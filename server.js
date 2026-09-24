@@ -372,15 +372,31 @@ function startTunnel(game, port) {
   ngrok.stderr.on('data', chunk => console.log('ngrok: ' + String(chunk).trim()));
   const stop = () => { try { ngrok.kill(); } catch {} };
   process.on('exit', stop);
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { stop(); process.exit(0); });
+  // SIGHUP: the console window was closed with its X button.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { stop(); process.exit(0); });
+}
+function openBrowser(url) {
+  require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
 }
 if (require.main === module) {
   const game = createRemoteGame();
   const port = Number(process.env.PORT || cfg.port);
+  // --open (desktop shortcut, npm start): show the library in the browser.
+  const open = process.argv.includes('--open');
+  if (open) process.title = 'RemoteGame';
+  game.server.on('error', err => {
+    if (err.code !== 'EADDRINUSE') throw err;
+    // Double-clicked twice: the first one is already serving, just show it.
+    console.log('RemoteGame ya está abierto. Abriendo el navegador…');
+    if (open) openBrowser('http://localhost:' + port);
+    setTimeout(() => process.exit(0), 3000);
+  });
   game.server.listen(port, () => {
     console.log('RemoteGame v0.5.0 en http://localhost:' + port);
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
     if (!process.argv.includes('--no-share') && process.env.SHARE !== '0') startTunnel(game, port);
+    if (open) openBrowser('http://localhost:' + port);
+    if (open) console.log('Cerrá esta ventana para apagar RemoteGame.');
   });
 }
 module.exports = { createRemoteGame };

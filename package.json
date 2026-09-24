@@ -4,7 +4,7 @@
   "description": "Biblioteca de emulación web con NES 2P sincronizado y EmulatorJS experimental",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server.js --open",
     "local": "node server.js --no-share",
     "netplay": "node netplay-node/index.js",
     "test": "node --test",
