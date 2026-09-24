@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RemoteGame - Mis juegos</title>
 <link rel="stylesheet" href="/style.css">
+<script src="/share.js"></script>
 <style>
 .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 .tab{background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:20px;padding:8px 16px;cursor:pointer;font-weight:700}
@@ -22,12 +23,8 @@
   <div id="info" class="mut">Cargando sistemas...</div>
   <div class="tabs" id="tabs"></div>
 
-  <div class="panel">
-    <b id="howTitle">NES / Family: 2 jugadores por link</b>
-    <div class="kbd" id="howBody">1. Elegí un juego → <b>Crear sala 2P</b> → copiá el link.<br>
-    2. Tu amigo lo abre en Chrome (PC o celu), la ROM se baja sola y entra como P2.<br>
-    3. Cada navegador corre su copia y solo viajan los botones: la latencia depende de la conexión de ambos.</div>
-  </div>
+  <div class="panel kbd" id="party">Cargando sala…</div>
+  <div class="panel kbd">Elegí un juego y tocá <b>▶ Jugar</b>. Tu amigo entra una sola vez con el link de arriba, desde la PC o el celu, sin instalar nada. Ve el juego que abras y juega como P2; si cambiás de juego, su pantalla cambia sola.</div>
 
   <input class="search" type="text" id="q" placeholder="🔍 Buscar juego... (ej: contra, mario, sonic, metal slug)">
   <div id="games" class="grid"></div>
@@ -45,15 +42,6 @@
 </main>
 <script>
 var systems=[], cur='nes', cache={};
-var ONLINE='<b>2P online:</b> el juego corre en tu PC y tu amigo recibe el video por un link; solo manda sus controles. No instala ni descarga nada. <b>2P local:</b> los dos en esta PC, con dos mandos o compartiendo teclado.';
-var HOW={
-  nes:['NES / Family: 2 jugadores','<b>2P online:</b> cada navegador corre su copia y solo viajan los botones (misma latencia para los dos). Creá la sala, pasá el link y pulsá Iniciar. <b>2P local:</b> dos mandos o teclado compartido en esta PC.'],
-  genesis:['Sega Genesis: 2 jugadores',ONLINE],
-  arcade:['Arcade / Neo Geo: 2 jugadores',ONLINE+' Si un juego no arranca con FBNeo, probá MAME 2003 desde el selector del emulador.'],
-  snes:['Super Nintendo: 2 jugadores',ONLINE],
-  n64:['Nintendo 64: 2 jugadores',ONLINE],
-  subidos:['Tus ROMs','Los ZIP requieren elegir su emulador. Las ROMs .nes usan el modo online sincronizado.']
-};
 async function init(){
   var r=await fetch('/api/systems').then(x=>x.json());
   systems=r.systems;
@@ -73,8 +61,6 @@ async function load(reset){
   var r=await fetch('/api/games?system='+cur+'&q='+encodeURIComponent(q)+'&limit=150').then(x=>x.json());
   if(selectedSystem!==cur)return;
   if(r.missing){document.getElementById('games').textContent='No encuentro la carpeta: '+r.missing;return;}
-  document.getElementById('howTitle').textContent=HOW[cur][0];
-  document.getElementById('howBody').innerHTML=HOW[cur][1];
   var box=document.getElementById('games'); box.innerHTML='';
   if(!r.games.length){box.innerHTML='<div class="panel">Sin resultados. Probá otra búsqueda.</div>';}
   r.games.forEach(function(g){
@@ -83,15 +69,9 @@ async function load(reset){
     d.querySelector('h3').textContent=g.name;
     d.querySelector('.meta').textContent=g.file+' · '+Math.round(g.size/1024)+' KB';
     var ejs='/play-ejs.html?system='+cur+'&file='+encodeURIComponent(g.file)+(cur==='nes'||(cur==='subidos'&&/\.nes$/i.test(g.file))?'&core=nes':'');
-    var bOnline=document.createElement('button');bOnline.className='btn-host';bOnline.textContent='🌐 2P online';
-    if(cur==='nes'||(cur==='subidos'&&/\.nes$/i.test(g.file))){
-      bOnline.onclick=function(){location.href='/play.html?system='+(cur==='subidos'?'subidos':'nes')+'&create='+encodeURIComponent(g.file);};
-    } else {
-      bOnline.onclick=function(){location.href=ejs+'&online=1';};
-    }
-    var bLocal=document.createElement('button');bLocal.className='btn-solo';bLocal.textContent='🎮 2P local';
-    bLocal.onclick=function(){location.href=ejs;};
-    d.appendChild(bOnline);d.appendChild(bLocal);
+    var bPlay=document.createElement('button');bPlay.className='btn-host';bPlay.textContent='▶ Jugar';
+    bPlay.onclick=function(){location.href=ejs;};
+    d.appendChild(bPlay);
     box.appendChild(d);
   });
   document.getElementById('more').textContent='Mostrando '+r.games.length+' de '+r.total+'. Usá el buscador para filtrar.';
@@ -106,6 +86,7 @@ document.getElementById('btnUp').onclick=async function(){
   document.getElementById('upMsg').textContent=r.ok?'listo':'error: '+(r.msg||'?');
   if(r.ok){cur='subidos';init();}
 };
+RemoteShare.banner(document.getElementById('party'));
 init().catch(function(e){document.getElementById('info').textContent='No se pudo cargar la biblioteca: '+e.message;});
 </script>
 </body>
