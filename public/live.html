@@ -38,7 +38,7 @@ body.touch #touch{display:grid}
 <script src="/pads.js"></script>
 </head>
 <body>
-<header><h1><a href="/">← RemoteGame</a></h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="net" class="mut"></span><button class="copy" id="full">Pantalla completa</button></header>
+<header><h1>🎮 RemoteGame</h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="net" class="mut"></span><button class="copy" id="full">Pantalla completa</button></header>
 <main>
   <div class="panel" id="status">Conectando…</div>
   <div id="wrap"><video id="screen" autoplay playsinline muted></video><button id="enter">▶ Tocá para entrar con sonido</button></div>
@@ -61,17 +61,15 @@ body.touch #touch{display:grid}
 <script>
 (async function(){
   const $=id=>document.getElementById(id);
-  const room=new URLSearchParams(location.search).get('room');
   const status=$('status'), video=$('screen');
   const setStatus=text=>{status.textContent=text;};
-  if(!room)return setStatus('Falta la sala en el link.');
-  const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
-  let ws=null, rtc=null, analog=false, seq=0, last=null, lastSent=0, keys={};
   const media=new MediaStream();
   video.srcObject=media;
-
+  // Buttons work right away, even while the network setup below is still loading.
   $('enter').onclick=()=>{video.muted=false;video.play().catch(()=>{});$('enter').style.display='none';};
   $('full').onclick=()=>{($('wrap').requestFullscreen||$('wrap').webkitRequestFullscreen).call($('wrap'));};
+  const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
+  let ws=null, rtc=null, analog=false, seq=0, last=null, lastSent=0, keys={};
 
   const GAME_KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','ShiftLeft','ShiftRight','KeyZ','KeyX','KeyA','KeyS','KeyQ','KeyW'];
   addEventListener('keydown',e=>{if(GAME_KEYS.includes(e.code))e.preventDefault();if(!keys[e.code]){keys[e.code]=true;poll();}});
@@ -119,8 +117,8 @@ body.touch #touch{display:grid}
   for(const type of ['pointerdown','pointermove','pointerup','pointercancel'])addEventListener(type,onFinger,{passive:false});
   // Neo Geo/arcade: name the buttons like the cabinet.
   function labelButtons(core){
-    if(core!=='fbneo'&&core!=='mame2003')return;
-    const names={b:'A',a:'B',y:'C',x:'D',select:'COIN'};
+    const arcade=core==='fbneo'||core==='mame2003';
+    const names=arcade?{b:'A',a:'B',y:'C',x:'D',select:'COIN'}:{b:'B',a:'A',y:'Y',x:'X',select:'SELECT'};
     for(const b of document.querySelectorAll('#touch [data-label]'))b.textContent=names[b.dataset.label];
   }
 
@@ -154,34 +152,51 @@ body.touch #touch{display:grid}
   }
   setInterval(stats,1000);
 
-  function startRtc(){
-    if(rtc)rtc.close();
+  let natTimer=null;
+  function stopRtc(){
+    clearTimeout(natTimer);
+    if(rtc){rtc.close();rtc=null;}
     for(const track of media.getTracks())media.removeTrack(track);
+  }
+  // A fresh answerer per game: the host page that opens a game sends a new offer.
+  function startRtc(){
+    stopRtc();
     rtc=new RemoteWebRTC({
       isHost:false,iceServers,
-      sendSignal:data=>ws.send(JSON.stringify({t:'signal',data})),
+      sendSignal:data=>send({t:'signal',data}),
       onTrack:track=>{media.addTrack(track);video.play().catch(()=>{});},
-      onOpen:()=>{setStatus('✅ Conectado. Jugás como P2.');seq=0;last=null;poll();},
-      onClose:()=>setStatus('Se cortó la conexión con el anfitrión. Recargá la página para volver.')
+      onOpen:()=>{clearTimeout(natTimer);setStatus('✅ Conectado. Jugás como P2.');seq=0;last=null;poll();},
+      onClose:()=>{if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');}
     });
     rtc.start();
     // No direct route between the two PCs and no TURN relay: nothing will flow.
-    setTimeout(()=>{if(rtc&&!rtc.isOpen())setStatus('No se pudo conectar directo con el anfitrión (NAT/CGNAT).\nEl anfitrión tiene que configurar un servidor TURN (TURN_URLS en el servidor).');},15000);
+    natTimer=setTimeout(()=>{if(rtc&&!rtc.isOpen())setStatus('No se pudo conectar directo con el anfitrión (NAT/CGNAT).\nEl anfitrión tiene que configurar un servidor TURN (TURN_URLS en el servidor).');},15000);
   }
 
-  ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-  ws.onopen=()=>ws.send(JSON.stringify({t:'join',room}));
-  ws.onclose=()=>{if(!rtc||!rtc.isOpen())setStatus('⚠️ Se perdió la conexión con el servidor. Recargá la página.');};
-  ws.onmessage=ev=>{
-    let m;try{m=JSON.parse(ev.data);}catch{return;}
-    if(m.t==='joined'){
-      if(m.kind!=='live'){location.href='/play.html?room='+encodeURIComponent(m.room);return;}
-      analog=m.core==='n64';$('title').textContent=m.rom;labelButtons(m.core);
-      setStatus('Entraste a la sala. Conectando video…');startRtc();
-    } else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
-    else if(m.t==='ended'){if(rtc){rtc.close();rtc=null;}setStatus(m.msg);}
-    else if(m.t==='error'){setStatus('❌ '+m.msg);}
-  };
+  // Permanent room: stay connected and follow whatever game the host opens.
+  let replaced=false;
+  const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
+  function connect(){
+    ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+    ws.onopen=()=>send({t:'guest'});
+    ws.onclose=()=>{
+      if(replaced)return;
+      if(!rtc||!rtc.isOpen())setStatus('Reconectando con el servidor…');
+      setTimeout(connect,2000);
+    };
+    ws.onmessage=ev=>{
+      let m;try{m=JSON.parse(ev.data);}catch{return;}
+      if(m.t==='game'){
+        if(!m.game){stopRtc();$('title').textContent='';setStatus('Esperando que el anfitrión abra un juego…');return;}
+        analog=m.game.core==='n64';$('title').textContent=m.game.rom;labelButtons(m.game.core);
+        setStatus('Cargando '+m.game.rom+'…');startRtc();
+      } else if(m.t==='host-left'){stopRtc();setStatus('El anfitrión está cambiando de juego…');}
+      else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
+      else if(m.t==='replaced'){replaced=true;stopRtc();setStatus('Abriste la sala en otra pestaña o dispositivo. Seguí jugando ahí.');}
+      else if(m.t==='error'){setStatus('❌ '+m.msg);}
+    };
+  }
+  connect();
 })();
 </script>
 </body>

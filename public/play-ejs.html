@@ -15,7 +15,7 @@
 <main>
   <div class="panel row"><label>Emulador <select id="core"></select></label><button class="copy" id="launch">Abrir</button><a class="copy" id="switch" style="text-decoration:none"></a></div>
   <div class="panel" id="online" style="display:none">
-    <div id="status">Creando sala…</div>
+    <div id="status">Conectando…</div>
     <div id="links" class="kbd"></div>
   </div>
   <div class="panel" id="localStatus" style="display:none"></div>
@@ -25,7 +25,8 @@
 <script>
 (async function(){
   const qs=new URLSearchParams(location.search), system=qs.get('system')||'genesis', file=qs.get('file')||'';
-  const online=qs.get('online')==='1';
+  // Online by default: the friend's link follows whatever game is open here.
+  const online=qs.get('local')!=='1';
   const defaults={nes:'nes',genesis:'segaMD',arcade:'fbneo',snes:'snes',n64:'n64'};
   const choices={nes:'NES / Family',snes:'Super Nintendo',segaMD:'Genesis',n64:'Nintendo 64',fbneo:'Arcade / Neo Geo (FBNeo)',mame2003:'MAME 2003'};
   const $=id=>document.getElementById(id);
@@ -40,13 +41,13 @@
     allowed.filter(Boolean).forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=choices[value];select.appendChild(option);});
     if(core)select.value=core;
     $('title').textContent=file;
-    $('mode').textContent=online?'2P online · vos sos P1':'2P local';
+    $('mode').textContent=online?'Online · vos sos P1':'2P local';
     $('launch').onclick=()=>{qs.set('core',select.value);location.search=qs.toString();};
-    const other=new URL(location.href);if(online)other.searchParams.delete('online');else other.searchParams.set('online','1');
-    $('switch').href=other;$('switch').textContent=online?'Cambiar a 2P local':'Cambiar a 2P online';
+    const other=new URL(location.href);other.searchParams.delete('online');if(online)other.searchParams.set('local','1');else other.searchParams.delete('local');
+    $('switch').href=other;$('switch').textContent=online?'Jugar 2P en esta PC':'Volver a online';
     $('help').innerHTML=online
       ?'<b>Vos (P1):</b> mando 1, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> · <kbd>Q</kbd> <kbd>W</kbd> · <kbd>Enter</kbd>=Start · <kbd>Shift</kbd>=Select/Moneda.<br>'
-       +'<b>Tu amigo (P2)</b> abre el link: ve el video de esta pestaña y maneja P2 con su teclado o mando. No instala ni descarga nada.<br>'
+       +'<b>Tu amigo (P2)</b> usa siempre el mismo link: ve el juego que abras acá y lo sigue solo cuando cambiás de juego. No instala ni descarga nada.<br>'
        +'Dejá esta pestaña visible: si la minimizás, el navegador frena el juego para los dos.'
       :'<b>P1:</b> mando 1, o teclado <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · <kbd>F</kbd> <kbd>G</kbd> <kbd>R</kbd> <kbd>T</kbd> · <kbd>Q</kbd> <kbd>E</kbd> · <kbd>1</kbd>=Select/Moneda · <kbd>2</kbd>=Start.<br>'
        +'<b>P2:</b> mando 2, o teclado <kbd>←↑↓→</kbd> · <kbd>K</kbd> <kbd>L</kbd> <kbd>I</kbd> <kbd>O</kbd> · <kbd>U</kbd> <kbd>P</kbd> · <kbd>Backspace</kbd>=Select/Moneda · <kbd>Enter</kbd>=Start.<br>'
@@ -81,7 +82,8 @@
   // Online: this tab emulates and streams video+audio; the guest sends only its controls.
   async function startHost(system,file,core,status){
     const REMOTE_PLAYER=1;
-    let video=null, audio=null, scale=1, rtc=null, remote=RemotePads.EMPTY, lastSeq=-1, ws=null;
+    let video=null, audio=null, scale=1, rtc=null, remote=RemotePads.EMPTY, lastSeq=-1, ws=null, replaced=false;
+    RemoteShare.banner($('links'));
     const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
 
     // Tap every connection to the speakers so the game audio can be streamed as well.
@@ -132,17 +134,17 @@
 
     await new Promise((resolve,reject)=>{
       ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-      ws.onopen=()=>{wsSend({t:'create',mode:'live',system,rom:file,core});resolve();};
+      // One permanent room: opening this game makes it the one the guest sees.
+      ws.onopen=()=>{wsSend({t:'host',system,rom:file,core});resolve();};
       ws.onerror=()=>reject(new Error('No se pudo conectar con el servidor.'));
-      ws.onclose=()=>{status.textContent='⚠️ Se perdió la conexión con el servidor. Recargá la página.';};
+      ws.onclose=()=>{if(!replaced)status.textContent='⚠️ Se perdió la conexión con el servidor. Recargá la página.';};
       ws.onmessage=ev=>{
         let m;try{m=JSON.parse(ev.data);}catch{return;}
-        if(m.t==='created'){
-          RemoteShare.render($('links'),'/live.html?room='+m.room);
-          status.textContent='Sala lista. Pasale uno de estos links a tu amigo y pulsá Start Game:';
-        } else if(m.t==='peer'){status.textContent='P2 entró, conectando video…';startRtc();}
+        if(m.t==='hosting'){status.textContent=m.guest?'Tu amigo ya está en la sala. Pulsá Start Game.':'Pulsá Start Game. Cuando tu amigo entre al link, ve este juego.';}
+        else if(m.t==='peer'){status.textContent='Tu amigo entró, conectando video…';startRtc();}
         else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
-        else if(m.t==='peer-left'){if(rtc){rtc.close();rtc=null;}releaseRemote();setNet('');status.textContent='P2 salió. Puede volver a entrar con el mismo link.';}
+        else if(m.t==='peer-left'){if(rtc){rtc.close();rtc=null;}releaseRemote();setNet('');status.textContent='Tu amigo salió. Vuelve a entrar con el mismo link.';}
+        else if(m.t==='replaced'){replaced=true;if(rtc){rtc.close();rtc=null;}releaseRemote();status.textContent='Abriste otro juego en otra pestaña: tu amigo ahora ve ese. Cerrá esta.';}
         else if(m.t==='error'){status.textContent='❌ '+m.msg;}
       };
     });
