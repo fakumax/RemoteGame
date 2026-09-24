@@ -29,8 +29,9 @@ after(async () => {
   await game.close();
   fs.rmSync(temp,{recursive:true,force:true});
 });
-async function wsClient() {
-  const ws=new WebSocket(base.replace('http','ws')+'/ws'); clients.push(ws);
+// remote: simulates a visitor arriving through the tunnel (ngrok adds X-Forwarded-For).
+async function wsClient(remote) {
+  const ws=new WebSocket(base.replace('http','ws')+'/ws',remote?{headers:{'X-Forwarded-For':'203.0.113.9'}}:undefined); clients.push(ws);
   ws.queue=[];ws.on('message',data=>ws.queue.push(JSON.parse(data)));
   await once(ws,'open');return ws;
 }
@@ -79,21 +80,38 @@ test('NES: waits for both ROMs, rejects P3, enforces host and reset generation',
   assert.equal((await message(host,'input')).pad,8);
   host.close();assert.match((await message(guest,'ended')).msg,/anfitrión/);assert.equal(game.rooms.has(created.room),false);
 });
-test('Live rooms: any system, guest gets the game info, large SDP relayed, guest can rejoin',async()=>{
-  const host=await wsClient(),guest=await wsClient();
-  send(host,{t:'create',mode:'live',system:'arcade',rom:'missing.zip',core:'fbneo'});await message(host,'error');
-  send(host,{t:'create',mode:'live',system:'nes',rom:'test.nes',core:'../x'});await message(host,'error');
-  send(host,{t:'create',mode:'live',system:'nes',rom:'test.nes',core:'nes'});
-  const created=await message(host,'created');assert.equal(created.kind,'live');
-  send(guest,{t:'join',room:created.room});
-  const joined=await message(guest,'joined');assert.deepEqual([joined.kind,joined.core,joined.rom],['live','nes','test.nes']);
+test('Party: one permanent link, the guest follows every game the host opens',async()=>{
+  const host=await wsClient(),guest=await wsClient(true);
+  send(host,{t:'host',system:'arcade',rom:'missing.zip',core:'fbneo'});await message(host,'error');
+  send(host,{t:'host',system:'nes',rom:'test.nes',core:'../x'});await message(host,'error');
+  send(host,{t:'host',system:'nes',rom:'test.nes',core:'nes'});assert.equal((await message(host,'hosting')).guest,false);
+  send(guest,{t:'guest'});assert.deepEqual((await message(guest,'game')).game,{system:'nes',rom:'test.nes',core:'nes'});
   await message(host,'peer');
+  assert.equal((await (await fetch(base+'/api/party')).json()).guest,true);
+  // Someone through the tunnel cannot take the host role.
+  send(guest,{t:'host',system:'nes',rom:'test.nes',core:'nes'});assert.match((await message(guest,'error')).msg,/anfitriona/);
   const sdp='v=0\r\n'+'a=x\r\n'.repeat(3000);
   send(host,{t:'signal',data:{sdp:{type:'offer',sdp}}});assert.equal((await message(guest,'signal')).data.sdp.sdp,sdp);
-  send(host,{t:'start'});await new Promise(r=>setTimeout(r,20));assert.equal(game.rooms.get(created.room).phase,'waiting');
-  guest.close();await message(host,'peer-left');
-  const again=await wsClient();send(again,{t:'join',room:created.room});await message(again,'joined');await message(host,'peer');
-  host.close();await message(again,'ended');
+  send(guest,{t:'signal',data:{candidate:'c'}});assert.equal((await message(host,'signal')).data.candidate,'c');
+  // Opening another game: the old page is replaced and the guest switches without a new link.
+  const host2=await wsClient();
+  send(host2,{t:'host',system:'nes',rom:'test.nes',core:'nes'});
+  await message(host,'replaced');await message(guest,'game');await message(host2,'peer');
+  host.close();await new Promise(r=>setTimeout(r,30));assert.equal(guest.queue.some(m=>m.t==='host-left'),false);
+  host2.close();await message(guest,'host-left');
+  assert.equal((await (await fetch(base+'/api/party')).json()).hosting,false);
+  // A reload of the guest replaces the old tab; closing it tells the host.
+  const host3=await wsClient();send(host3,{t:'host',system:'nes',rom:'test.nes',core:'nes'});await message(host3,'peer');
+  const guest2=await wsClient(true);send(guest2,{t:'guest'});await message(guest,'replaced');await message(host3,'peer');
+  guest2.close();await message(host3,'peer-left');
+  host3.close();
+});
+test('Party: visitors through the tunnel land on the room, this PC sees the library',async()=>{
+  const remote=await fetch(base+'/',{redirect:'manual',headers:{'X-Forwarded-For':'203.0.113.9'}});
+  assert.equal(remote.status,302);assert.equal(remote.headers.get('location'),'/sala');
+  assert.equal((await fetch(base+'/')).status,200);
+  assert.match(await (await fetch(base+'/sala')).text(),/P2 · invitado/);
+  const upload=await fetch(base+'/api/upload',{method:'POST',headers:{'X-Forwarded-For':'203.0.113.9'}});assert.equal(upload.status,403);
 });
 test('Both websocket protocols coexist; EJS rejection/disconnect cannot remove another room',async()=>{
   const a=await sio(),b=await sio(),c=await sio(),d=await sio(),rejected=await sio();

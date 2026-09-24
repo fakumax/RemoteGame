@@ -67,6 +67,9 @@ function listGames(sysId, q, limit) {
 
 const app = express();
 app.use(express.json());
+// The guest link is just the address: visitors land on the room, the library is for this PC.
+app.get('/', (req, res, next) => fromThisPc(req) ? next() : res.redirect(302, '/sala'));
+app.get('/sala', (req, res) => res.sendFile(path.join(__dirname, 'public', 'live.html')));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0 }));
 
 // Ambos protocolos comparten el servidor HTTP, sin un proxy ni otro proceso.
@@ -213,7 +216,7 @@ const netplay = require('./netplay-node/functions').attach(server, app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
 server.on('upgrade', (req, socket, head) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
-  if (pathname === '/ws') wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
+  if (pathname === '/ws') wss.handleUpgrade(req, socket, head, ws => { ws.local = fromThisPc(req); wss.emit('connection', ws); });
   else if (!pathname.startsWith('/socket.io/')) socket.destroy();
 });
 const rooms = new Map();
@@ -247,19 +250,33 @@ wss.on('connection', ws => {
     try { m = JSON.parse(buffer); } catch { return; }
     if (!m || typeof m !== 'object') return;
     if (m.t === 'latency') return send(ws, { t: 'latency', ts: m.ts });
-    if (m.t === 'create' && m.mode === 'live') {
-      // Live rooms: the host emulates and streams video; the guest only sends controls.
-      if (ws.room) return send(ws, { t: 'error', msg: 'Ya estás en una sala' });
+    if (m.t === 'host') {
+      // Only a page opened on this PC can host: the tunnel must not let anyone take over.
+      if (!ws.local) return send(ws, { t: 'error', msg: 'Solo la PC anfitriona puede abrir juegos' });
       const system = String(m.system || '');
       const sys = getSys(system);
       const rom = safeFile(m.rom);
       const core = String(m.core || '');
       if (!sys || !rom || !/^[a-z0-9]{1,20}$/.test(core) || !sys.exts.includes(path.extname(rom).toLowerCase()) || !fs.existsSync(path.join(sys.dir, rom))) return send(ws, { t: 'error', msg: 'Juego inválido o inexistente' });
-      let id;
-      do { id = crypto.randomBytes(6).toString('hex').toUpperCase(); } while (rooms.has(id));
-      rooms.set(id, { id, kind: 'live', system, rom, core, players: [ws], epoch: 0, ready: new Set(), phase: 'waiting' });
-      ws.room = id;
-      return send(ws, { t: 'created', room: id, kind: 'live', system, rom, core, role: 'p1' });
+      // Opening another game (or reloading) replaces the previous host page.
+      if (party.host && party.host !== ws) { party.host.partyRole = null; send(party.host, { t: 'replaced' }); }
+      party.host = ws; ws.partyRole = 'host';
+      party.game = { system, rom, core };
+      send(ws, { t: 'hosting', guest: !!party.guest });
+      send(party.guest, { t: 'game', game: party.game });
+      if (party.guest) send(ws, { t: 'peer' });
+      return;
+    }
+    if (m.t === 'guest') {
+      // One guest: a new tab (or a reload) takes the place of the old one.
+      if (party.guest && party.guest !== ws) { party.guest.partyRole = null; send(party.guest, { t: 'replaced' }); }
+      party.guest = ws; ws.partyRole = 'guest';
+      send(ws, { t: 'game', game: party.host ? party.game : null });
+      if (party.host) send(party.host, { t: 'peer' });
+      return;
+    }
+    if (ws.partyRole && m.t === 'signal' && m.data) {
+      return send(ws.partyRole === 'host' ? party.guest : party.host, { t: 'signal', data: m.data });
     }
     if (m.t === 'create') {
       if (ws.room) return send(ws, { t: 'error', msg: 'Ya estás en una sala' });
@@ -311,7 +328,22 @@ wss.on('connection', ws => {
     }
     if (m.t === 'ping' || m.t === 'pong') send(room.players.find(peer => peer !== ws), { t: m.t, ts: m.ts });
   });
-  ws.on('close', () => leave(ws));
+  ws.on('close', () => { leaveParty(ws); leave(ws); });
+});
+// The party: one permanent link for the guest, whatever game the host opens.
+const party = { host: null, guest: null, game: null };
+function leaveParty(ws) {
+  if (ws.partyRole === 'host' && party.host === ws) {
+    party.host = null;
+    send(party.guest, { t: 'host-left' });
+  } else if (ws.partyRole === 'guest' && party.guest === ws) {
+    party.guest = null;
+    send(party.host, { t: 'peer-left' });
+  }
+  ws.partyRole = null;
+}
+app.get('/api/party', (req, res) => {
+  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: !!party.guest, hosting: !!party.host, game: party.host ? party.game : null });
 });
 async function close() {
   for (const ws of wss.clients) ws.terminate();
@@ -322,7 +354,7 @@ async function close() {
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
 return Object.assign(game, { app, server, wss, rooms, netplay, close, lanUrls });
 }
-// --share: opens an ngrok tunnel so guests outside the home network can join.
+// Opens an ngrok tunnel (unless --no-share) so guests outside the home network can join.
 // Only pages and signaling go through it; video and controls travel over WebRTC.
 function startTunnel(game, port) {
   const { spawn } = require('child_process');
@@ -332,8 +364,8 @@ function startTunnel(game, port) {
     let entry; try { entry = JSON.parse(line); } catch { return; }
     if (entry.url && /^https:/.test(entry.url) && !game.publicUrl) {
       game.publicUrl = entry.url;
-      console.log('Por Internet: ' + entry.url);
-    } else if (entry.lvl === 'eror' || entry.err) console.log('ngrok: ' + (entry.err || entry.msg));
+      console.log('\n  Link para tu amigo:  ' + entry.url + '\n  (es siempre el mismo; pasáselo una sola vez)\n');
+    } else if (entry.lvl === 'eror' || (entry.err && entry.err !== '<nil>')) console.log('ngrok: ' + (entry.err || entry.msg));
   };
   let buffer = '';
   ngrok.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split('\n'); buffer = lines.pop(); lines.forEach(onLine); });
@@ -348,7 +380,7 @@ if (require.main === module) {
   game.server.listen(port, () => {
     console.log('RemoteGame v0.5.0 en http://localhost:' + port);
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
-    if (process.argv.includes('--share')) startTunnel(game, port);
+    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0') startTunnel(game, port);
   });
 }
 module.exports = { createRemoteGame };

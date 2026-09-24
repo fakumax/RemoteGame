@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "share": "node server.js --share",
+    "local": "node server.js --no-share",
     "netplay": "node netplay-node/index.js",
     "test": "node --test",
     "setup": "npm ci && npm ci --prefix netplay-node",
