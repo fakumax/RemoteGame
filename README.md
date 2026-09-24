@@ -4,21 +4,21 @@ Biblioteca de ROMs para jugar desde un navegador. Lee la colección sin modifica
 
 ## Inicio
 
-Requiere Node.js 22 o posterior e Internet para cargar los emuladores fijados a EmulatorJS 4.2.3 y jsnes 1.2.1.
+Requiere Node.js 22 o posterior, ngrok instalado con su authtoken e Internet para cargar EmulatorJS 4.2.3.
 
 ```powershell
 npm run setup
-npm start          # tu PC y tu red de casa
-npm run share      # además, link por Internet con ngrok
+npm start          # biblioteca + sala online con link por Internet (ngrok)
+npm run local      # sin túnel: solo esta PC y tu red de casa
 ```
 
-Abrir http://localhost:3000 en la PC anfitriona. Al arrancar, la consola muestra la dirección para la misma red (por ejemplo `http://192.168.100.20:3000`) y, con `npm run share`, la de Internet.
+Al arrancar, la consola muestra el **link para tu amigo** (con ngrok gratis es siempre el mismo dominio) y la dirección de tu red. Abrí http://localhost:3000 en tu PC.
 
 `PORT` cambia el puerto. `GAMES_ROOT` cambia la carpeta de la colección; por defecto se busca `Desktop/GAMES LAUNCHBOX EMULATOR` dentro del perfil del usuario. Estructura esperada:
 
 | Sistema | Carpeta dentro de GAMES_ROOT | Emulador |
 | --- | --- | --- |
-| NES | NES | jsnes (online) / EmulatorJS (local) |
+| NES | NES | nes |
 | Genesis | Sega Genesis | segaMD |
 | Arcade / Neo Geo | MAME/Roms | FBNeo o MAME 2003 |
 | Super Nintendo | Super Nintendo/Roms | snes |
@@ -28,21 +28,20 @@ PlayStation 1 está excluida por elección del usuario. PS2, PS3, Dreamcast, Nao
 
 ## Jugar con otra persona
 
-Cada juego tiene **2P online** y **2P local**.
+Hay **una sola sala, permanente**. Tu amigo abre el link una vez (desde PC o celu, sin instalar nada) y se queda ahí. Vos elegís un juego y tocás **▶ Jugar**; su pantalla muestra ese juego, y cuando volvés a la biblioteca y abrís otro, cambia sola, sin nuevo link ni recargar.
 
-- **2P online (SNES, Genesis, Arcade/Neo Geo, N64): streaming.** El juego corre en la pestaña del anfitrión, que transmite video y audio por WebRTC a resolución nativa. El invitado abre el link, ve el video y manda sus controles como P2 (teclado, mando o controles táctiles en el celu). No instala ni descarga nada y no puede desincronizarse. El anfitrión juega sin retraso; el invitado suma la ida y vuelta de la red más unos ms de codificación. La pestaña del anfitrión tiene que quedar visible: minimizada, el navegador frena el juego.
-- **2P online (NES): lockstep.** Cada navegador corre jsnes y solo viajan los botones, con un delay configurable (2 frames por defecto). Cada paquete WebRTC repite los últimos 8 frames y, mientras la partida espera, se reenvían; así una pérdida de paquetes no congela la partida. Sin WebRTC, usa el WebSocket del servidor.
-- **2P local:** P1 y P2 ya tienen mando (1.º y 2.º mando conectado) y teclado compartido (P1 `WASD` + `F G R T`, P2 flechas + `K L I O`).
+- **Streaming:** el juego corre en tu pestaña, que transmite video y audio por WebRTC a resolución nativa. Tu amigo manda sus controles como P2 (teclado, mando o controles táctiles). No puede desincronizarse. Vos jugás sin retraso; tu amigo suma la ida y vuelta de la red más unos ms de codificación.
+- **Tu pestaña tiene que quedar visible:** minimizada, el navegador frena el juego para los dos.
+- **Solo tu PC es anfitriona.** Quien entra por el link cae en la sala (`/sala`), no en la biblioteca, y no puede abrir juegos ni subir ROMs.
+- **2P en la misma PC:** desde la página del juego, *Jugar 2P en esta PC* (mando 1 y 2, o teclado compartido: P1 `WASD` + `F G R T`, P2 flechas + `K L I O`).
 
-### Links: misma red e Internet
+### Conexión
 
-La página del anfitrión muestra los links para compartir:
+- **Internet:** por ngrok pasan solo las páginas y la señalización; video y controles van directo entre navegadores. ngrok gratis muestra una advertencia la primera vez: tu amigo toca *Visit Site*.
+- **Misma red:** `http://<IP-de-esta-PC>:3000`. Windows tiene que permitir conexiones entrantes a Node: con la red marcada como *Pública* (y la regla de bloqueo que crea Windows) los otros dispositivos no conectan. Marcá la red como *Privada* y permití el puerto 3000 en ese perfil.
+- **CGNAT:** si alguna de las dos conexiones no permite conexión directa, WebRTC necesita un relay TURN: `TURN_URLS` (separadas por coma), `TURN_USERNAME` y `TURN_CREDENTIAL`. Sin TURN, tu amigo ve un aviso a los 15 segundos.
 
-- **Misma red:** `http://<IP-de-esta-PC>:3000/...`. Windows tiene que permitir conexiones entrantes a Node en esa red: con la red marcada como *Pública* y la regla de bloqueo que crea Windows, los otros dispositivos no conectan. Marcá la red como *Privada* y permití Node (o el puerto 3000) en ese perfil.
-- **Internet:** `npm run share` abre un túnel de ngrok (tiene que estar instalado y con authtoken). Por ngrok pasan solo las páginas y la señalización; video y controles van directo entre navegadores por WebRTC. ngrok gratis muestra una advertencia la primera vez: el invitado toca *Visit Site*.
-- **CGNAT:** si una de las dos conexiones no permite conexión directa, WebRTC necesita un relay TURN. Configurarlo con `TURN_URLS` (separadas por coma), `TURN_USERNAME` y `TURN_CREDENTIAL`. Sin TURN, el invitado ve un aviso a los 15 segundos.
-
-Con el túnel activo, cualquiera que tenga el link ve la biblioteca. Subir ROMs solo se permite desde la PC anfitriona.
+`public/play.html` conserva el modo NES por lockstep (cada navegador emula y solo viajan los botones), ya no enlazado desde la biblioteca.
 
 ## ROMs y BIOS
 
