@@ -33,6 +33,9 @@ PlayStation 1 está excluida por elección del usuario. PS2, PS3, Dreamcast, Nao
 Hay **una sola sala, permanente**. Tu amigo abre el link una vez (desde PC o celu, sin instalar nada) y se queda ahí. Vos elegís un juego y tocás **▶ Jugar**; su pantalla muestra ese juego, y cuando volvés a la biblioteca y abrís otro, cambia sola, sin nuevo link ni recargar.
 
 - **Streaming:** el juego corre en tu pestaña, que transmite video y audio por WebRTC a resolución nativa. Tu amigo manda sus controles como P2 (teclado, mando o controles táctiles). No puede desincronizarse. Vos jugás sin retraso; tu amigo suma la ida y vuelta de la red más unos ms de codificación.
+- **Filtro CRT:** líneas de barrido, máscara RGB y viñeta dibujadas con CSS encima de la imagen, sin trabajo por cuadro. No entra en el video transmitido: cada uno lo prende o apaga en su pantalla (📺 CRT) y queda recordado en ese navegador.
+- **Cambio de red:** si el invitado pasa de WiFi a 4G (o al revés) o se corta la ruta, la sala se reconecta sola por la red nueva; también hay un botón 🔄 Reconectar.
+- **Nombres completos:** la biblioteca muestra y busca por el título de LaunchBox (`Data/Platforms/*.xml`, solo lectura; `LAUNCHBOX_DIR` cambia la carpeta). Los juegos que no están en LaunchBox usan el nombre del archivo sin marcas como `[!]`.
 - **Tu pestaña tiene que quedar visible:** minimizada, el navegador frena el juego para los dos.
 - **Solo tu PC es anfitriona.** Quien entra por el link cae en la sala (`/sala`), no en la biblioteca, y no puede abrir juegos ni subir ROMs.
 - **2P en la misma PC:** desde la página del juego, *Jugar 2P en esta PC* (mando 1 y 2, o teclado compartido: P1 `WASD` + `F G R T`, P2 flechas + `K L I O`).
