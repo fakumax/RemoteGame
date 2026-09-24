@@ -12,6 +12,8 @@ npm start          # biblioteca + sala online con link por Internet (ngrok)
 npm run local      # sin túnel: solo esta PC y tu red de casa
 ```
 
+**Acceso directo en el escritorio:** apunta a `node.exe` con `server.js --open`, carpeta de inicio la del proyecto, e ícono `assets/remotegame.ico`. Con doble clic se abre la ventana del servidor y la biblioteca en el navegador; si ya estaba abierto, solo abre el navegador. Cerrar la ventana apaga el servidor y el túnel. No se empaqueta como `.exe`: Smart App Control de Windows bloquea ejecutables sin firma, mientras que `node.exe` está firmado por OpenJS Foundation.
+
 Al arrancar, la consola muestra el **link para tu amigo** (con ngrok gratis es siempre el mismo dominio) y la dirección de tu red. Abrí http://localhost:3000 en tu PC.
 
 `PORT` cambia el puerto. `GAMES_ROOT` cambia la carpeta de la colección; por defecto se busca `Desktop/GAMES LAUNCHBOX EMULATOR` dentro del perfil del usuario. Estructura esperada:
