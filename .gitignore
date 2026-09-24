@@ -1,0 +1,10 @@
+node_modules/
+roms/*
+!roms/.gitkeep
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+test-results/
+config.local.json

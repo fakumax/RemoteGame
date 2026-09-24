@@ -1,0 +1,4 @@
+{
+  "port": 3000,
+  "note": "Lee los juegos de GAMES LAUNCHBOX EMULATOR en modo solo lectura (variable GAMES_ROOT). Las subidas van a ./roms local."
+}

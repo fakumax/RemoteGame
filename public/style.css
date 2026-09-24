@@ -1,0 +1,26 @@
+:root { --bg:#14161c; --card:#1e2230; --line:#2c3350; --txt:#e8ebf5; --mut:#9aa3c0; --acc:#5aa2ff; --ok:#3ddc84; --warn:#ffb020; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--txt); font-family:Segoe UI,Arial,sans-serif; }
+header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+header h1 { font-size:18px; margin:0; }
+header .sub { color:var(--mut); font-size:13px; }
+main { padding:18px; max-width:1100px; margin:0 auto; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:12px; margin-top:14px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+.card h3 { margin:0 0 4px; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.card .meta { color:var(--mut); font-size:12px; margin-bottom:10px; }
+.card button { width:100%; margin-top:6px; padding:9px; border:0; border-radius:8px; cursor:pointer; font-weight:600; }
+.btn-host { background:var(--acc); color:#08122b; }
+.btn-solo { background:#2a3050; color:var(--txt); border:1px solid var(--line); }
+.row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+input[type=text], input[type=file] { background:#0f1220; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:9px; }
+button.copy { background:#2a3050; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:8px 12px; cursor:pointer; }
+.pill { display:inline-block; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:700; }
+.p1 { background:#12325e; color:#9cc6ff; } .p2 { background:#3a2a10; color:#ffcf7a; }
+.ok { color:var(--ok); } .mut { color:var(--mut); }
+#screen { width:min(768px,100%); aspect-ratio:256/240; background:#000; border:2px solid var(--line); border-radius:8px; image-rendering:pixelated; }
+.panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:12px; }
+.kbd { font-size:13px; color:var(--mut); line-height:1.7; }
+kbd { background:#0f1220; border:1px solid var(--line); border-radius:5px; padding:1px 7px; font-size:12px; }
+#status { font-size:14px; }
+a { color:var(--acc); }
