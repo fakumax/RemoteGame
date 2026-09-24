@@ -20,7 +20,12 @@ before(async () => {
   zip.writeZip(path.join(temp,'uploads','genesis.zip'));
   zip.writeZip(path.join(temp,'MAME','Roms','neogeo.zip'));
   fs.writeFileSync(path.join(temp,'NES','secret.txt'),'not a rom');
-  game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads') });
+  fs.writeFileSync(path.join(temp,'NES','Other_Game (U) [!].nes'), Buffer.from('NES\x1a'));
+  // A LaunchBox list with the full title for test.nes, path relative to the LaunchBox folder.
+  fs.mkdirSync(path.join(temp,'LaunchBox','Data','Platforms'),{recursive:true});
+  fs.writeFileSync(path.join(temp,'LaunchBox','Data','Platforms','NES.xml'),
+    '<?xml version="1.0"?><LaunchBox><Game><ApplicationPath>..\\NES\\test.nes</ApplicationPath><Title>Rock &amp; Roll Racing</Title><ReleaseDate>1993-06-01T00:00:00</ReleaseDate></Game></LaunchBox>');
+  game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'LaunchBox') });
   game.server.listen(0,'127.0.0.1');await once(game.server,'listening');
   base='http://127.0.0.1:'+game.server.address().port;
 });
@@ -62,6 +67,13 @@ test('ROMs: validates files, preserves uploaded ZIPs and exposes BIOS without li
   const list=await (await fetch(base+'/api/games?system=arcade')).json();assert.equal(list.total,0);
   assert.equal((await fetch(base+'/api/rom/nes/test.nes')).headers.get('cache-control'),'no-cache');
 });
+test('Names: full titles from LaunchBox, searchable by title or file; others tidied',async()=>{
+  const all=await (await fetch(base+'/api/games?system=nes')).json();
+  const byFile=Object.fromEntries(all.games.map(g=>[g.file,g]));
+  assert.equal(byFile['test.nes'].name,'Rock & Roll Racing');assert.equal(byFile['test.nes'].year,'1993');
+  assert.equal(byFile['Other_Game (U) [!].nes'].name,'Other Game (U)');
+  for(const q of ['roll racing','test'])assert.deepEqual((await (await fetch(base+'/api/games?system=nes&q='+encodeURIComponent(q))).json()).games.map(g=>g.file),['test.nes']);
+});
 test('NES: waits for both ROMs, rejects P3, enforces host and reset generation',async()=>{
   const host=await wsClient(),guest=await wsClient(),third=await wsClient();
   send(host,{t:'create',rom:'test.nes'});const created=await message(host,'created');
@@ -85,7 +97,7 @@ test('Party: one permanent link, the guest follows every game the host opens',as
   send(host,{t:'host',system:'arcade',rom:'missing.zip',core:'fbneo'});await message(host,'error');
   send(host,{t:'host',system:'nes',rom:'test.nes',core:'../x'});await message(host,'error');
   send(host,{t:'host',system:'nes',rom:'test.nes',core:'nes'});assert.equal((await message(host,'hosting')).guest,false);
-  send(guest,{t:'guest'});assert.deepEqual((await message(guest,'game')).game,{system:'nes',rom:'test.nes',core:'nes'});
+  send(guest,{t:'guest'});assert.deepEqual((await message(guest,'game')).game,{system:'nes',rom:'test.nes',core:'nes',name:'Rock & Roll Racing'});
   await message(host,'peer');
   assert.equal((await (await fetch(base+'/api/party')).json()).guest,true);
   // Someone through the tunnel cannot take the host role.

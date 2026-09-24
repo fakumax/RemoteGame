@@ -20,6 +20,7 @@ function createRemoteGame(options = {}) {
 const PORT = options.port ?? (process.env.PORT ? Number(process.env.PORT) : cfg.port);
 const GAMES_ROOT = path.resolve(options.gamesRoot || process.env.GAMES_ROOT || path.join(os.homedir(), 'Desktop', 'GAMES LAUNCHBOX EMULATOR'));
 const LOCAL_ROMS = path.resolve(options.localRoms || path.join(__dirname, 'roms'));
+const LAUNCHBOX = path.resolve(options.launchBoxDir || process.env.LAUNCHBOX_DIR || path.join(os.homedir(), 'LaunchBox'));
 fs.mkdirSync(LOCAL_ROMS, { recursive: true });
 const game = { publicUrl: null };
 
@@ -42,6 +43,38 @@ function safeFile(name) {
   if (!base || base === '.' || base === '..' || base !== String(name) || /[\\/:\x00-\x1f]/.test(base)) return null;
   return base;
 }
+// Full titles come from LaunchBox's own lists (read only), keyed by the ROM's full path.
+// Reloaded only when an XML changes, so searching stays cheap.
+let titles = new Map(), titlesStamp = '';
+function xmlText(block, tag) {
+  const m = block.match(new RegExp('<' + tag + '>([\\s\\S]*?)</' + tag + '>'));
+  return m ? m[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&').trim() : '';
+}
+function launchBoxTitles() {
+  const dir = path.join(LAUNCHBOX, 'Data', 'Platforms');
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => /\.xml$/i.test(f)); } catch (e) { return titles; }
+  const stamp = files.map(f => { try { return f + fs.statSync(path.join(dir, f)).mtimeMs; } catch (e) { return f; } }).join('|');
+  if (stamp === titlesStamp) return titles;
+  const next = new Map();
+  for (const f of files) {
+    let xml = '';
+    try { xml = fs.readFileSync(path.join(dir, f), 'utf8'); } catch (e) { continue; }
+    for (const block of xml.split('<Game>').slice(1)) {
+      const app = xmlText(block, 'ApplicationPath'), title = xmlText(block, 'Title');
+      if (!app || !title) continue;
+      next.set(path.resolve(LAUNCHBOX, app).toLowerCase(), { title, year: xmlText(block, 'ReleaseDate').slice(0, 4) });
+    }
+  }
+  titles = next; titlesStamp = stamp;
+  return titles;
+}
+function gameInfo(sys, file) {
+  const known = launchBoxTitles().get(path.join(sys.dir, file).toLowerCase());
+  // Not in LaunchBox: tidy the file name, dropping dump tags like [!] or [T+Spa1.0].
+  const tidy = file.replace(/\.[^.]+$/, '').replace(/\s*\[[^\]]*\]/g, '').replace(/_+/g, ' ').trim();
+  return { name: known ? known.title : tidy || file, year: known ? known.year : '' };
+}
 function listGames(sysId, q, limit) {
   const sys = getSys(sysId);
   if (!sys) return { total: 0, games: [] };
@@ -52,12 +85,15 @@ function listGames(sysId, q, limit) {
   const needle = String(q || '').toLowerCase();
   for (const f of files) {
     const low = f.toLowerCase();
-    if (sysId === 'arcade' && /^(neogeo|pgm|skns)\.zip$/i.test(f)) continue;
+    // BIOS and sound/CPU device sets: needed by some games, not playable on their own.
+    if (sysId === 'arcade' && /^(neogeo|pgm|skns|stvbios|qsound|qsound_hle|m68705p5|namcoc76|tms320c32|ym2413|sys246|sys256|coh1002m)\.zip$/i.test(f)) continue;
     if (!exts.some(e => low.endsWith(e))) continue;
-    if (needle && low.indexOf(needle) < 0) continue;
+    const { name, year } = gameInfo(sys, f);
+    // Search the full title and the file name: "metal slug" and "mslug" both work.
+    if (needle && low.indexOf(needle) < 0 && name.toLowerCase().indexOf(needle) < 0) continue;
     let size = 0;
     try { const stat = fs.statSync(path.join(sys.dir, f)); if (!stat.isFile()) continue; size = stat.size; } catch (e) { continue; }
-    out.push({ file: f, name: f.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '), size });
+    out.push({ file: f, name, year, size });
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
   const total = out.length;
@@ -261,8 +297,8 @@ wss.on('connection', ws => {
       // Opening another game (or reloading) replaces the previous host page.
       if (party.host && party.host !== ws) { party.host.partyRole = null; send(party.host, { t: 'replaced' }); }
       party.host = ws; ws.partyRole = 'host';
-      party.game = { system, rom, core };
-      send(ws, { t: 'hosting', guest: !!party.guest });
+      party.game = { system, rom, core, name: gameInfo(sys, rom).name };
+      send(ws, { t: 'hosting', guest: !!party.guest, name: party.game.name });
       send(party.guest, { t: 'game', game: party.game });
       if (party.guest) send(ws, { t: 'peer' });
       return;

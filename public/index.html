@@ -67,7 +67,8 @@ async function load(reset){
     var d=document.createElement('div'); d.className='card';
     d.innerHTML='<h3></h3><div class="meta"></div>';
     d.querySelector('h3').textContent=g.name;
-    d.querySelector('.meta').textContent=g.file+' · '+Math.round(g.size/1024)+' KB';
+    d.querySelector('h3').title=g.name;
+    d.querySelector('.meta').textContent=(g.year?g.year+' · ':'')+g.file+' · '+Math.round(g.size/1024)+' KB';
     var ejs='/play-ejs.html?system='+cur+'&file='+encodeURIComponent(g.file)+(cur==='nes'||(cur==='subidos'&&/\.nes$/i.test(g.file))?'&core=nes':'');
     var bPlay=document.createElement('button');bPlay.className='btn-host';bPlay.textContent='▶ Jugar';
     bPlay.onclick=function(){location.href=ejs;};
