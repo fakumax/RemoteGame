@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RemoteGame - Partida NES</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+#touch{display:none;gap:10px;margin-top:12px;user-select:none;-webkit-user-select:none}
+#touch .dpad{display:grid;grid-template-columns:repeat(3,64px);grid-template-rows:repeat(3,64px);gap:4px}
+#touch .ab{display:flex;gap:10px;align-items:center;margin-left:auto}
+#touch button{background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:14px;font-size:18px;font-weight:700;touch-action:none}
+#touch .dpad button{width:64px;height:64px}
+#touch .ab button{width:76px;height:76px;border-radius:50%}
+#touch .sys{display:flex;gap:10px;margin-top:8px}
+#touch .sys button{padding:10px 18px;font-size:14px;border-radius:10px}
+#touch button.on{background:var(--acc);color:#08122b}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jsnes@1.2.1/dist/jsnes.min.js"></script>
+<script src="/lockstep.js"></script>
+<script src="/webrtc.js"></script>
+<script src="/share.js"></script>
+</head>
+<body>
+<header>
+  <h1><a href="/" style="text-decoration:none;color:inherit">← RemoteGame</a></h1>
+  <span id="role" class="pill p1">...</span>
+  <span id="ping" class="mut"></span>
+  <button class="copy" id="btnCopy" style="display:none">Copiar link P2</button>
+</header>
+<main>
+  <div id="status" class="panel">Conectando...</div>
+  <div id="links" class="panel kbd" style="display:none"></div>
+  <div style="margin-top:12px"><canvas id="screen" width="256" height="240"></canvas></div>
+  <div id="touch">
+    <div class="dpad">
+      <span></span><button data-k="ArrowUp">▲</button><span></span>
+      <button data-k="ArrowLeft">◀</button><button data-k="ArrowDown">▼</button><button data-k="ArrowRight">▶</button>
+      <span></span><span></span><span></span>
+    </div>
+    <div class="ab">
+      <button data-k="KeyZ">B</button>
+      <button data-k="KeyX">A</button>
+    </div>
+  </div>
+  <div id="touch2" style="display:none" class="row">
+    <button class="copy" data-k="ShiftLeft">SELECT</button>
+    <button class="copy" data-k="Enter">START</button>
+  </div>
+  <div class="panel row">
+    <button class="btn-host" id="btnStart" style="display:none;padding:10px 18px;border:0;border-radius:8px;font-weight:700;cursor:pointer">▶ Iniciar partida</button>
+    <button class="copy" id="btnResync">↻ Resync</button>
+    <button class="copy" id="btnSound">🔇 Sonido off</button>
+    <label class="mut">Delay <select id="delay"><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select> frames</label>
+  </div>
+  <div class="panel kbd">
+    <b>Controles (cada uno usa los suyos para su jugador):</b><br>
+    <kbd>←↑↓→</kbd> mover · <kbd>Z</kbd>=B · <kbd>X</kbd>=A · <kbd>Enter</kbd>=Start · <kbd>Shift</kbd>=Select<br>
+    Mando USB/Bluetooth: DPad o stick = mover · botón 0 = B · botón 1 = A · 8 = Select · 9 = Start.<br>
+    El invitado baja la ROM sola al abrir el link y le queda en caché para jugar después.
+  </div>
+</main>
+<script>
+var $ = function(id){ return document.getElementById(id); };
+var qs = new URLSearchParams(location.search);
+var canvas = $('screen'), ctx = canvas.getContext('2d');
+var image = ctx.createImageData(256, 240);
+var ws=null, room=qs.get('room'), roomCreate=qs.get('create'), soloFile=qs.get('solo');
+var romFile=soloFile||null, role=soloFile?'solo':null, peerOn=false;
+var romSys=qs.get('system')||'nes';
+var nes=null, running=false, sendFrame=0, emuFrame=0;
+var sync=new RemoteLockstep(2), epoch=0, pendingLoad=Promise.resolve();
+var soundOn=false, audioCtx=null, audioNode=null, audioQueue=[];
+var keys={};
+addEventListener('blur',function(){keys={};});
+document.addEventListener('visibilitychange',function(){if(document.hidden)keys={};});
+addEventListener('keydown', function(e){
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].indexOf(e.code)>=0) e.preventDefault();
+  keys[e.code]=true;
+});
+addEventListener('keyup', function(e){ keys[e.code]=false; });
+
+function padGamepad(){
+  try{
+    var gps=navigator.getGamepads?navigator.getGamepads():[];
+    for(var k=0;k<gps.length;k++){
+      var g=gps[k]; if(!g||!g.connected) continue;
+      var m=0;
+      var b=function(i){ return g.buttons[i]&&g.buttons[i].pressed; };
+      if(b(1)||b(2))m|=1; if(b(0)||b(3))m|=2; if(b(8))m|=4; if(b(9))m|=8;
+      if(b(12)||(g.axes[1]<-0.5))m|=16; if(b(13)||(g.axes[1]>0.5))m|=32;
+      if(b(14)||(g.axes[0]<-0.5))m|=64; if(b(15)||(g.axes[0]>0.5))m|=128;
+      return m;
+    }
+  }catch(e){}
+  return 0;
+}
+function readPad(){
+  var m=0;
+  if(keys['KeyX'])m|=1; if(keys['KeyZ'])m|=2;
+  if(keys['ShiftLeft']||keys['ShiftRight'])m|=4; if(keys['Enter'])m|=8;
+  if(keys['ArrowUp'])m|=16; if(keys['ArrowDown'])m|=32;
+  if(keys['ArrowLeft'])m|=64; if(keys['ArrowRight'])m|=128;
+  return m|padGamepad();
+}
+function draw(fb){
+  for(var i=0;i<256*240;i++){
+    image.data[i*4]=fb[i]&255; image.data[i*4+1]=(fb[i]>>8)&255;
+    image.data[i*4+2]=(fb[i]>>16)&255; image.data[i*4+3]=255;
+  }
+  ctx.putImageData(image,0,0);
+}
+function pushAudio(l,r){ if(soundOn&&audioQueue.length<9000){audioQueue.push((l+r)/2);} }
+function initAudio(){
+  try{
+    if(audioCtx){audioCtx.resume();return;}
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    audioNode=audioCtx.createScriptProcessor(1024,0,1);
+    audioNode.onaudioprocess=function(e){
+      var o=e.outputBuffer.getChannelData(0);
+      for(var i=0;i<o.length;i++) o[i]=audioQueue.length?audioQueue.shift():0;
+    };
+    audioNode.connect(audioCtx.destination);
+  }catch(e){}
+}
+function applyPad(p, mask){
+  var C=jsnes.Controller;
+  var pairs=[[0,C.BUTTON_A],[1,C.BUTTON_B],[2,C.BUTTON_SELECT],[3,C.BUTTON_START],[4,C.BUTTON_UP],[5,C.BUTTON_DOWN],[6,C.BUTTON_LEFT],[7,C.BUTTON_RIGHT]];
+  for(var i=0;i<pairs.length;i++){
+    if((mask>>pairs[i][0])&1) nes.buttonDown(p,pairs[i][1]);
+    else nes.buttonUp(p,pairs[i][1]);
+  }
+}
+function setStatus(h){ $('status').textContent=h.replace(/<br>/g,'\n').replace(/<[^>]*>/g,''); }
+function setRole(r){
+  role=r;
+  var el=$('role');
+  el.textContent = r==='p1'?'P1 · vos (host)':(r==='p2'?'P2 · invitado':(r==='solo'?'Solo':'...'));
+  el.className='pill '+(r==='p2'?'p2':'p1');
+}
+async function loadRom(file){
+  setStatus('Bajando ROM <b>'+file+'</b>...');
+  var url='/api/rom/'+encodeURIComponent(romSys)+'/'+encodeURIComponent(file);
+  var resp=await fetch(url);
+  if(!resp.ok&&romSys==='nes') resp=await fetch('/api/rom/'+encodeURIComponent(file));
+  if(!resp.ok) throw new Error('HTTP '+resp.status);
+  var buf=await resp.arrayBuffer();
+  var bytes=new Uint8Array(buf), bin='';
+  for(var i=0;i<bytes.length;i++) bin+=String.fromCharCode(bytes[i]);
+  if(typeof jsnes==='undefined') throw new Error('No cargo jsnes (CDN). Revisa internet.');
+  nes=new jsnes.NES({onFrame:draw,onAudioSample:pushAudio,sampleRate:audioCtx?audioCtx.sampleRate:44100});
+  nes.loadROM(bin);
+  draw(new Array(256*240).fill(0));
+}
+function resetNet(delay){ sync.reset(delay||2); audioQueue=[]; recent=[]; }
+var rtc=null, isWebRTC=false, lastPing=null, recent=[], recentEnd=0, REDUNDANCY=8, iceServers;
+fetch('/api/ice').then(function(r){return r.json();}).then(function(s){iceServers=s;}).catch(function(){});
+function setPingText(ms, isP2P){
+  lastPing=ms;
+  var label=isP2P?'WebRTC P2P (UDP)':'WebSocket';
+  $('ping').textContent=ms+' ms ('+label+')';
+}
+function initWebRTC(isHost){
+  if(rtc){rtc.close();rtc=null;}
+  isWebRTC=false;
+  rtc=new RemoteWebRTC({
+    isHost:isHost,iceServers:iceServers,
+    sendSignal:function(data){wsSend({t:'signal',data:data});},
+    onOpen:function(){
+      isWebRTC=true;
+      if(lastPing!==null)setPingText(lastPing,true);
+    },
+    onClose:function(){
+      isWebRTC=false;
+      if(lastPing!==null)setPingText(lastPing,false);
+    },
+    onMessage:function(m){
+      if(m&&m.t==='input'&&m.epoch===epoch){
+        sync.receive(m.frame,m.pad);
+      } else if(m&&m.t==='inputs'&&m.epoch===epoch&&Array.isArray(m.p)&&m.p.length<=REDUNDANCY){
+        for(var i=0;i<m.p.length;i++) sync.receive(m.f+i,m.p[i]);
+      }
+    },
+    onPing:function(rtt){
+      setPingText(rtt,true);
+    }
+  });
+  rtc.start();
+}
+function loop(){
+  if(!nes||!running) return;
+  try {
+    var pad=readPad();
+    if(role==='solo'){applyPad(1,pad);applyPad(2,0);nes.frame();return;}
+    var sentNew=false;
+    var advanced=sync.tick(pad,function(frame,pad){
+      recent.push(pad);if(recent.length>REDUNDANCY)recent.shift();
+      recentEnd=frame;sentNew=true;
+      if(rtc&&rtc.isOpen()){
+        // The DataChannel drops lost packets: repeat recent frames so a gap never stalls lockstep.
+        rtc.send({t:'inputs',epoch:epoch,f:frame-recent.length+1,p:recent});
+      } else {
+        wsSend({t:'input',epoch:epoch,frame:frame,pad:pad});
+      }
+    },function(lp,rp){
+      applyPad(1,role==='p1'?lp:rp);applyPad(2,role==='p1'?rp:lp);nes.frame();
+    });
+    // Waiting on each other produces no new packets: resend, or a lost one deadlocks both.
+    if(!advanced&&!sentNew&&recent.length&&rtc&&rtc.isOpen()) rtc.send({t:'inputs',epoch:epoch,f:recentEnd-recent.length+1,p:recent});
+    setStatus(advanced?'Jugando: '+romFile+' · '+role.toUpperCase():'Esperando al otro jugador…');
+  } catch(e) { running=false;setStatus('Error del emulador: '+e.message); }
+}
+setInterval(loop,1000/60);
+function wsSend(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
+function connect(){
+  return new Promise(function(res,rej){
+    var p=(location.protocol==='https:'?'wss':'ws');
+    ws=new WebSocket(p+'://'+location.host+'/ws');
+    ws.onopen=res; ws.onerror=rej;
+    var messages=Promise.resolve();ws.onmessage=function(ev){messages=messages.then(function(){return onMsg(ev);}).catch(function(e){running=false;setStatus('Error: '+e.message);});}; ws.onclose=function(){running=false; if(role!=='solo') setStatus('⚠️ Conexión perdida. Recargá la página.'); };
+  });
+}
+async function onMsg(ev){
+  var m; try{m=JSON.parse(ev.data);}catch(e){return;}
+  if(m.t==='created'){
+    room=m.room; romFile=m.rom; romSys=m.system||'nes'; setRole('p1');
+    history.replaceState(null,'','/play.html?room='+room);
+    $('btnStart').style.display='';$('links').style.display='';RemoteShare.render($('links'),'/play.html?room='+room);
+    pendingLoad=loadRom(romFile); await pendingLoad;
+    setStatus('Sala '+room+' lista. Pasale uno de estos links a tu amigo. Cuando entre, pulsá Iniciar partida.');
+  } else if(m.t==='joined'){
+    room=m.room; romFile=m.rom; romSys=m.system||'nes'; setRole(m.role); if(m.role==='p2'){$('btnResync').style.display='none';$('delay').disabled=true;initWebRTC(false);}
+    if(m.role==='p1'){$('btnStart').style.display='';}
+    pendingLoad=loadRom(romFile); await pendingLoad;
+    setStatus(m.role==='p1'?'Sos P1. Esperando rival...':'Unido como <b>P2</b>. Esperando que el host inicie...');
+  } else if(m.t==='peer'){
+    peerOn=true;
+    // 'peer' reaches both players; only the host offers, the guest answers (set up on 'joined').
+    if(role==='p1')initWebRTC(true);
+    setStatus('✅ Rival conectado. Host: pulsa <b>Iniciar partida</b>.');
+  } else if(m.t==='peer-left'){
+    peerOn=false; running=false;
+    if(rtc){rtc.close();rtc=null;isWebRTC=false;}
+    setStatus('El otro jugador salió. Esperá a P2 y reiniciá la partida.');
+  } else if(m.t==='ended'){
+    running=false;peerOn=false;
+    if(rtc){rtc.close();rtc=null;isWebRTC=false;}
+    setStatus(m.msg);
+  } else if(m.t==='input'){
+    if(m.epoch===epoch)sync.receive(m.frame,m.pad);
+  } else if(m.t==='signal'){
+    if(rtc)rtc.handleSignal(m.data);
+  } else if(m.t==='reset'){
+    running=false;epoch=m.epoch;
+    var requestedEpoch=epoch;
+    await pendingLoad;
+    pendingLoad=loadRom(romFile);await pendingLoad;
+    if(epoch===requestedEpoch)wsSend({t:'ready',epoch:epoch});
+  } else if(m.t==='start'){
+    if(m.epoch!==epoch)return;
+    resetNet(m.delay);$('delay').value=String(m.delay);running=true;
+    setStatus('Jugando: '+romFile);
+  } else if(m.t==='ping'){ wsSend({t:'pong',room:room,ts:m.ts});
+  } else if(m.t==='pong'){ if(!isWebRTC)setPingText(Math.max(0,Date.now()-m.ts),false);
+  } else if(m.t==='error'){ setStatus('❌ '+m.msg); }
+}
+$('btnStart').onclick=function(){initAudio();wsSend({t:'start',delay:Number($('delay').value)});};
+$('btnResync').onclick=async function(){
+  if(role==='solo'){running=false;await loadRom(romFile);resetNet();running=true;}
+  else if(role==='p1')wsSend({t:'resync',delay:Number($('delay').value)});
+};
+$('btnSound').onclick=function(){ soundOn=!soundOn; if(soundOn)initAudio(); this.textContent=soundOn?'🔊 Sonido on':'🔇 Sonido off'; };
+$('btnCopy').onclick=async function(){var l=location.origin+'/play.html?room='+room;try{await navigator.clipboard.writeText(l);this.textContent='¡Copiado!';}catch(e){setStatus('Copiá este enlace: '+l);}};
+setInterval(function(){ if(ws&&room&&!isWebRTC) wsSend({t:'ping',room:room,ts:Date.now()}); },2000);
+function bindTouch(){
+  var btns=document.querySelectorAll('#touch button[data-k],#touch2 button[data-k]');
+  for(var i=0;i<btns.length;i++){
+    (function(b){
+      var code=b.getAttribute('data-k');
+      var on=function(e){e.preventDefault();keys[code]=true;b.classList.add('on');};
+      var off=function(e){e.preventDefault();keys[code]=false;b.classList.remove('on');};
+      b.addEventListener('touchstart',on,{passive:false});
+      b.addEventListener('touchend',off,{passive:false});
+      b.addEventListener('touchcancel',off,{passive:false});
+      b.addEventListener('mousedown',on);b.addEventListener('mouseup',off);b.addEventListener('mouseleave',off);
+    })(btns[i]);
+  }
+  if('ontouchstart' in window||navigator.maxTouchPoints>0){
+    document.getElementById('touch').style.display='flex';
+    document.getElementById('touch2').style.display='flex';
+  }
+}
+bindTouch();
+(async function boot(){
+  try{
+    if(soloFile){
+      setRole('solo'); romFile=soloFile;
+      pendingLoad=loadRom(romFile); await pendingLoad; resetNet(); running=true;
+      setStatus('Modo solo: '+romFile+'. Para 2P volvé al inicio y creá una sala.');
+      return;
+    }
+    await connect();
+    if(roomCreate){ wsSend({t:'create',system:romSys,rom:roomCreate}); setStatus('Creando sala...'); }
+    else if(room){ setStatus('Uniéndose a sala '+room+'...'); wsSend({t:'join',room:room}); }
+    else setStatus('Sin sala. <a href="/">Volvé al inicio</a>.');
+  }catch(e){ setStatus('❌ '+e.message); }
+})();
+</script>
+</body>
+</html>
