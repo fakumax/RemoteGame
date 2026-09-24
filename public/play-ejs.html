@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RemoteGame · Emulador</title>
+<link rel="stylesheet" href="/style.css">
+<style>#game{width:min(960px,100%);aspect-ratio:4/3;height:min(720px,75vw);position:relative;overflow:hidden;margin:12px auto;background:#000}select{padding:8px}#status{white-space:pre-line}</style>
+<script src="/webrtc.js"></script>
+<script src="/pads.js"></script>
+<script src="/share.js"></script>
+</head>
+<body>
+<header><h1><a href="/">← RemoteGame</a></h1><span id="title"></span><span id="mode" class="pill p1"></span><span id="net" class="mut"></span></header>
+<main>
+  <div class="panel row"><label>Emulador <select id="core"></select></label><button class="copy" id="launch">Abrir</button><a class="copy" id="switch" style="text-decoration:none"></a></div>
+  <div class="panel" id="online" style="display:none">
+    <div id="status">Creando sala…</div>
+    <div id="links" class="kbd"></div>
+  </div>
+  <div class="panel" id="localStatus" style="display:none"></div>
+  <div id="game"></div>
+  <div class="panel kbd" id="help"></div>
+</main>
+<script>
+(async function(){
+  const qs=new URLSearchParams(location.search), system=qs.get('system')||'genesis', file=qs.get('file')||'';
+  const online=qs.get('online')==='1';
+  const defaults={nes:'nes',genesis:'segaMD',arcade:'fbneo',snes:'snes',n64:'n64'};
+  const choices={nes:'NES / Family',snes:'Super Nintendo',segaMD:'Genesis',n64:'Nintendo 64',fbneo:'Arcade / Neo Geo (FBNeo)',mame2003:'MAME 2003'};
+  const $=id=>document.getElementById(id);
+  const status=online?$('status'):$('localStatus');
+  if(online)$('online').style.display='';else status.style.display='';
+  try {
+    if(!file)throw new Error('Falta el juego. Volvé al inicio.');
+    let core=qs.get('core')||defaults[system]||(/\.nes$/i.test(file)?'nes':/\.(bin|md|smd|gen)$/i.test(file)?'segaMD':null);
+    const allowed=system==='subidos'?Object.keys(choices):system==='arcade'?['fbneo','mame2003']:[defaults[system]];
+    if(core&&!allowed.includes(core))throw new Error('Emulador incompatible con el sistema seleccionado.');
+    const select=$('core');
+    allowed.filter(Boolean).forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=choices[value];select.appendChild(option);});
+    if(core)select.value=core;
+    $('title').textContent=file;
+    $('mode').textContent=online?'2P online · vos sos P1':'2P local';
+    $('launch').onclick=()=>{qs.set('core',select.value);location.search=qs.toString();};
+    const other=new URL(location.href);if(online)other.searchParams.delete('online');else other.searchParams.set('online','1');
+    $('switch').href=other;$('switch').textContent=online?'Cambiar a 2P local':'Cambiar a 2P online';
+    $('help').innerHTML=online
+      ?'<b>Vos (P1):</b> mando 1, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> · <kbd>Q</kbd> <kbd>W</kbd> · <kbd>Enter</kbd>=Start · <kbd>Shift</kbd>=Select/Moneda.<br>'
+       +'<b>Tu amigo (P2)</b> abre el link: ve el video de esta pestaña y maneja P2 con su teclado o mando. No instala ni descarga nada.<br>'
+       +'Dejá esta pestaña visible: si la minimizás, el navegador frena el juego para los dos.'
+      :'<b>P1:</b> mando 1, o teclado <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · <kbd>F</kbd> <kbd>G</kbd> <kbd>R</kbd> <kbd>T</kbd> · <kbd>Q</kbd> <kbd>E</kbd> · <kbd>1</kbd>=Select/Moneda · <kbd>2</kbd>=Start.<br>'
+       +'<b>P2:</b> mando 2, o teclado <kbd>←↑↓→</kbd> · <kbd>K</kbd> <kbd>L</kbd> <kbd>I</kbd> <kbd>O</kbd> · <kbd>U</kbd> <kbd>P</kbd> · <kbd>Backspace</kbd>=Select/Moneda · <kbd>Enter</kbd>=Start.<br>'
+       +'Mandos: botón de abajo/derecha/izquierda/arriba = B/A/Y/X (en Neo Geo: A/B/C/D). Si el mando no responde, apretá un botón con la pestaña enfocada.';
+    if(core==='n64')$('help').innerHTML+='<br>N64: el teclado de P1 es el de EmulatorJS (stick en <kbd>T</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd>); P2 solo con mando.';
+    if(!core){status.textContent='Elegí el emulador correspondiente a este ZIP y pulsá Abrir.';return;}
+
+    window.EJS_player='#game';window.EJS_gameName=file;window.EJS_core=core;
+    window.EJS_gameUrl='/api/rom/'+encodeURIComponent(system)+'/'+encodeURIComponent(file)+'?raw=1';
+    window.EJS_pathtodata='https://cdn.emulatorjs.org/4.2.3/data/';
+    window.EJS_defaultControls=RemotePads.ejsControls(core,online?'online':'local');
+    window.EJS_noAutoFocus=true;
+    $('game').addEventListener('pointerdown',function(event){if(!event.target.closest('input,select,button'))this.focus({preventScroll:true});});
+    window.EJS_alignStartButton='center';window.EJS_language='en-US';window.EJS_disableAutoLang=true;
+    window.EJS_startOnLoaded=false;window.EJS_backgroundColor='#14161c';
+    if(core==='fbneo'||core==='mame2003') {
+      const response=await fetch('/api/arcade-bios');if(!response.ok)throw new Error('No se pudo consultar los BIOS.');
+      const bios=await response.json();
+      // FBNeo needs neogeo.zip still zipped, next to the ROM.
+      if(bios['/neogeo.zip']){window.EJS_biosUrl=bios['/neogeo.zip'];window.EJS_dontExtractBIOS=true;}
+      else status.textContent='Falta neogeo.zip en MAME/Roms para los juegos Neo Geo.';
+    }
+    let h=2166136261;for(const char of system+'|'+core+'|'+file){h^=char.charCodeAt(0);h=Math.imul(h,16777619);}
+    window.EJS_gameID=h>>>0;
+    if(online)await startHost(system,file,core,status);
+    else status.textContent='Pulsá Start Game. P1 y P2 ya tienen teclado y mando asignados.';
+    const loader=document.createElement('script');loader.src=window.EJS_pathtodata+'loader.js';
+    loader.onerror=()=>{status.textContent='No se pudo cargar EmulatorJS. Revisá la conexión a Internet.';};
+    document.body.appendChild(loader);
+  } catch(error){status.textContent=error.message;}
+
+  // Online: this tab emulates and streams video+audio; the guest sends only its controls.
+  async function startHost(system,file,core,status){
+    const REMOTE_PLAYER=1;
+    let video=null, audio=null, scale=1, rtc=null, remote=RemotePads.EMPTY, lastSeq=-1, ws=null;
+    const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
+
+    // Tap every connection to the speakers so the game audio can be streamed as well.
+    const connect=AudioNode.prototype.connect;
+    AudioNode.prototype.connect=function(target,...rest){
+      if(target instanceof AudioDestinationNode){
+        const ctx=target.context;
+        if(!ctx.remoteTap){ctx.remoteTap=ctx.createMediaStreamDestination();audio=ctx.remoteTap.stream.getAudioTracks()[0];rtc&&rtc.setTracks(video,audio,scale);}
+        connect.call(this,ctx.remoteTap);
+      }
+      return connect.call(this,target,...rest);
+    };
+    window.EJS_onGameStart=()=>{
+      const canvas=window.EJS_emulator&&EJS_emulator.canvas;
+      if(canvas&&canvas.captureStream){
+        // No frame-rate argument: captures every drawn frame (60), captureStream(60) measured ~37.
+        video=canvas.captureStream().getVideoTracks()[0];
+        // The canvas is the game upscaled (e.g. 960x720 for 320x240): send the native size.
+        scale=Math.max(1,Math.floor(canvas.height/(core==='n64'?480:240)));
+        rtc&&rtc.setTracks(video,audio,scale);
+      }
+      else status.textContent='Este navegador no puede transmitir el juego.';
+    };
+
+    const simulate=(index,value)=>{try{EJS_emulator.gameManager.simulateInput(REMOTE_PLAYER,index,value);}catch(e){}};
+    const releaseRemote=()=>{RemotePads.applyGuest(remote,RemotePads.EMPTY,simulate);remote=RemotePads.EMPTY;};
+    const setNet=text=>{$('net').textContent=text;};
+    const wsSend=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
+
+    function startRtc(){
+      if(rtc)rtc.close();
+      lastSeq=-1;
+      rtc=new RemoteWebRTC({
+        isHost:true,media:true,iceServers,
+        sendSignal:data=>wsSend({t:'signal',data}),
+        onOpen:()=>{status.textContent='✅ P2 conectado. Jugando online.';setNet('conectado');},
+        onClose:()=>{releaseRemote();setNet('');},
+        onPing:rtt=>setNet('ida y vuelta '+rtt+' ms'),
+        onMessage:m=>{
+          if(!m||m.t!=='pad'||!Number.isInteger(m.s)||m.s<=lastSeq)return;
+          lastSeq=m.s;
+          const next={b:(m.b|0)&0xffff,x:Math.max(-127,Math.min(127,m.x|0)),y:Math.max(-127,Math.min(127,m.y|0))};
+          RemotePads.applyGuest(remote,next,simulate);remote=next;
+        }
+      });
+      rtc.start().then(()=>rtc.setTracks(video,audio,scale));
+    }
+
+    await new Promise((resolve,reject)=>{
+      ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+      ws.onopen=()=>{wsSend({t:'create',mode:'live',system,rom:file,core});resolve();};
+      ws.onerror=()=>reject(new Error('No se pudo conectar con el servidor.'));
+      ws.onclose=()=>{status.textContent='⚠️ Se perdió la conexión con el servidor. Recargá la página.';};
+      ws.onmessage=ev=>{
+        let m;try{m=JSON.parse(ev.data);}catch{return;}
+        if(m.t==='created'){
+          RemoteShare.render($('links'),'/live.html?room='+m.room);
+          status.textContent='Sala lista. Pasale uno de estos links a tu amigo y pulsá Start Game:';
+        } else if(m.t==='peer'){status.textContent='P2 entró, conectando video…';startRtc();}
+        else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
+        else if(m.t==='peer-left'){if(rtc){rtc.close();rtc=null;}releaseRemote();setNet('');status.textContent='P2 salió. Puede volver a entrar con el mismo link.';}
+        else if(m.t==='error'){status.textContent='❌ '+m.msg;}
+      };
+    });
+  }
+})();
+</script>
+</body>
+</html>
