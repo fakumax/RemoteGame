@@ -19,6 +19,7 @@
       this.onMessage = typeof options.onMessage === 'function' ? options.onMessage : () => {};
       this.onPing = typeof options.onPing === 'function' ? options.onPing : () => {};
       this.onTrack = typeof options.onTrack === 'function' ? options.onTrack : () => {};
+      this.onState = typeof options.onState === 'function' ? options.onState : () => {};
       // Host streaming: send-only video/audio transceivers whose tracks are swapped in later.
       this.media = !!options.media;
       this.iceServers = options.iceServers || ICE_SERVERS;
@@ -107,6 +108,11 @@
         if (event.candidate && !this.closed) {
           this.sendSignal({ candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate });
         }
+      };
+
+      // 'disconnected'/'failed' when the network under the connection changes or drops.
+      this.pc.oniceconnectionstatechange = () => {
+        if (this.pc && !this.closed) this.onState(this.pc.iceConnectionState);
       };
 
       this.pc.ontrack = (event) => {

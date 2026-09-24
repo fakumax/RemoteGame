@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/style.css">
 <style>
 #wrap{position:relative;width:min(960px,100%);aspect-ratio:4/3;margin:12px auto;background:#000;border-radius:8px;overflow:hidden}
+#frame{position:relative;height:100%;aspect-ratio:4/3;max-width:100%;margin:0 auto}
 #screen{width:100%;height:100%;object-fit:contain;display:block;image-rendering:pixelated}
 #enter{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);color:#fff;font-size:20px;font-weight:700;border:0;cursor:pointer;width:100%}
 #status{white-space:pre-line}
@@ -36,12 +37,13 @@ body.touch #touch{display:grid}
 </style>
 <script src="/webrtc.js"></script>
 <script src="/pads.js"></script>
+<script src="/crt.js"></script>
 </head>
 <body>
-<header><h1>🎮 RemoteGame</h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="net" class="mut"></span><button class="copy" id="full">Pantalla completa</button></header>
+<header><h1>🎮 RemoteGame</h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="net" class="mut"></span><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="crt"></button><button class="copy" id="full">Pantalla completa</button></header>
 <main>
   <div class="panel" id="status">Conectando…</div>
-  <div id="wrap"><video id="screen" autoplay playsinline muted></video><button id="enter">▶ Tocá para entrar con sonido</button></div>
+  <div id="wrap"><div id="frame"><video id="screen" autoplay playsinline muted></video></div><button id="enter">▶ Tocá para entrar con sonido</button></div>
   <div id="touch">
     <div id="shoulders"><button data-code="KeyQ">L</button><button data-code="KeyW">R</button></div>
     <div id="dpad"><i style="left:50%;top:16%">▲</i><i style="left:50%;top:84%">▼</i><i style="left:16%;top:50%">◀</i><i style="left:84%;top:50%">▶</i></div>
@@ -65,6 +67,7 @@ body.touch #touch{display:grid}
   const setStatus=text=>{status.textContent=text;};
   const media=new MediaStream();
   video.srcObject=media;
+  const crt=RemoteCRT.attach($('frame'),$('crt'));
   // Buttons work right away, even while the network setup below is still loading.
   $('enter').onclick=()=>{video.muted=false;video.play().catch(()=>{});$('enter').style.display='none';};
   $('full').onclick=()=>{($('wrap').requestFullscreen||$('wrap').webkitRequestFullscreen).call($('wrap'));};
@@ -166,7 +169,13 @@ body.touch #touch{display:grid}
       sendSignal:data=>send({t:'signal',data}),
       onTrack:track=>{media.addTrack(track);video.play().catch(()=>{});},
       onOpen:()=>{clearTimeout(natTimer);setStatus('✅ Conectado. Jugás como P2.');seq=0;last=null;poll();},
-      onClose:()=>{if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');}
+      onClose:()=>{if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');},
+      // The route under the call died (e.g. 4G dropped): rebuild it instead of waiting.
+      onState:state=>{
+        clearTimeout(dropTimer);
+        if(state==='failed')reconnectNow('Se perdió la ruta de red');
+        else if(state==='disconnected')dropTimer=setTimeout(()=>reconnectNow('Se cortó la red'),2000);
+      }
     });
     rtc.start();
     // No direct route between the two PCs and no TURN relay: nothing will flow.
@@ -174,28 +183,45 @@ body.touch #touch{display:grid}
   }
 
   // Permanent room: stay connected and follow whatever game the host opens.
-  let replaced=false;
+  let replaced=false, dropTimer=null, retryTimer=null, lastReconnect=0;
   const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
+  // Exactly one socket at a time: a second one would take the guest seat from the first.
   function connect(){
-    ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-    ws.onopen=()=>send({t:'guest'});
-    ws.onclose=()=>{
-      if(replaced)return;
+    clearTimeout(retryTimer);
+    if(ws){const old=ws;ws=null;try{old.close();}catch(e){}}
+    const socket=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+    ws=socket;
+    socket.onopen=()=>send({t:'guest'});
+    socket.onclose=()=>{
+      if(replaced||ws!==socket)return;
       if(!rtc||!rtc.isOpen())setStatus('Reconectando con el servidor…');
-      setTimeout(connect,2000);
+      retryTimer=setTimeout(connect,2000);
     };
-    ws.onmessage=ev=>{
+    socket.onmessage=ev=>{
+      if(ws!==socket)return;
       let m;try{m=JSON.parse(ev.data);}catch{return;}
       if(m.t==='game'){
         if(!m.game){stopRtc();$('title').textContent='';setStatus('Esperando que el anfitrión abra un juego…');return;}
-        analog=m.game.core==='n64';$('title').textContent=m.game.rom;labelButtons(m.game.core);
-        setStatus('Cargando '+m.game.rom+'…');startRtc();
+        analog=m.game.core==='n64';$('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core);crt.setCore(m.game.core);
+        setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
       } else if(m.t==='host-left'){stopRtc();setStatus('El anfitrión está cambiando de juego…');}
       else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
       else if(m.t==='replaced'){replaced=true;stopRtc();setStatus('Abriste la sala en otra pestaña o dispositivo. Seguí jugando ahí.');}
       else if(m.t==='error'){setStatus('❌ '+m.msg);}
     };
   }
+  // Switching WiFi/4G leaves the call on the old route: start over on the new one right away.
+  function reconnectNow(reason){
+    if(replaced||Date.now()-lastReconnect<3000)return;
+    lastReconnect=Date.now();
+    clearTimeout(dropTimer);
+    stopRtc();
+    setStatus((reason||'Reconectando')+'… reconectando');
+    connect();
+  }
+  if(navigator.connection)navigator.connection.addEventListener('change',()=>reconnectNow('Cambió la red'));
+  addEventListener('online',()=>reconnectNow('Volvió la conexión'));
+  $('reconnect').onclick=()=>{lastReconnect=0;reconnectNow('Reconectando');};
   connect();
 })();
 </script>
