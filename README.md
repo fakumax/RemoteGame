@@ -2,6 +2,8 @@
 
 Biblioteca de ROMs para jugar desde un navegador. Lee la colección sin modificarla; las subidas se guardan únicamente en `roms/`.
 
+> **Este repositorio no incluye ni distribuye juegos, ROMs ni BIOS:** solo contiene el código del programa. Cada persona es responsable de los archivos que use con él y de tener derecho a hacerlo, por ejemplo copias de juegos que posee. Los nombres de juegos y consolas son marcas de sus dueños y este proyecto no tiene relación con ellos. EmulatorJS no se incluye: se carga desde su CDN. El software se ofrece "tal cual", sin garantías (ver [LICENSE](LICENSE)).
+
 ## Inicio
 
 Requiere Node.js 22 o posterior, pnpm (`corepack enable` lo activa, viene con Node), ngrok instalado con su authtoken e Internet para cargar EmulatorJS 4.2.3.
@@ -73,4 +75,4 @@ pnpm test:browser
 
 Requiere Microsoft Edge instalado. Abre navegadores de prueba sin ventana; usa Contra, Metal Slug, Sonic Eraser, Super Bomberman y Mario Kart 64 si están presentes. Compara el estado emulado de dos clientes NES en el mismo frame y guarda capturas/resultados en `test-results/`. El avance de frames solo prueba que el núcleo está ejecutándose: las capturas deben inspeccionarse, porque un núcleo puede mostrar un error de ROM mientras sigue avanzando. No es un benchmark de latencia de mando a pantalla ni una certificación de toda la colección.
 
-`roms/`, dependencias, capturas, registros y archivos `.env` están excluidos de Git. No se realizó push.
+`roms/`, dependencias, capturas, registros y archivos `.env` están excluidos de Git.
