@@ -16,6 +16,8 @@
     "multer": "^2.5.0",
     "ws": "^8.22.0"
   },
+  "license": "MIT",
+  "author": "Facundo Vergara",
   "private": true,
   "devDependencies": {
     "@playwright/test": "^1.64.1",
