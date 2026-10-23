@@ -4,12 +4,12 @@ Biblioteca de ROMs para jugar desde un navegador. Lee la colección sin modifica
 
 ## Inicio
 
-Requiere Node.js 22 o posterior, ngrok instalado con su authtoken e Internet para cargar EmulatorJS 4.2.3.
+Requiere Node.js 22 o posterior, pnpm (`corepack enable` lo activa, viene con Node), ngrok instalado con su authtoken e Internet para cargar EmulatorJS 4.2.3.
 
 ```powershell
-npm run setup
-npm start          # biblioteca + sala online con link por Internet (ngrok)
-npm run local      # sin túnel: solo esta PC y tu red de casa
+pnpm install
+pnpm start         # biblioteca + sala online con link por Internet (ngrok)
+pnpm local         # sin túnel: solo esta PC y tu red de casa
 ```
 
 **Acceso directo en el escritorio:** apunta a `node.exe` con `server.js --open`, carpeta de inicio la del proyecto, e ícono `assets/remotegame.ico`. Con doble clic se abre la ventana del servidor y la biblioteca en el navegador; si ya estaba abierto, solo abre el navegador. Cerrar la ventana apaga el servidor y el túnel. No se empaqueta como `.exe`: Smart App Control de Windows bloquea ejecutables sin firma, mientras que `node.exe` está firmado por OpenJS Foundation.
@@ -59,9 +59,8 @@ Fuentes de compatibilidad: [FAQ de EmulatorJS](https://emulatorjs.org/docs/faq/)
 ## Verificación
 
 ```powershell
-npm test
-npm audit --omit=dev
-npm audit --prefix netplay-node --omit=dev
+pnpm test
+pnpm audit --prod
 ```
 
 Las pruebas usan archivos temporales propios y puertos libres. Cubren aislamiento de salas, desconexiones, rechazo de jugadores extra, validación de mensajes, sincronización inicial, descarte de generaciones antiguas, ZIPs sin alterar, BIOS y colas de controles acotadas bajo pausas y variación del retraso.
@@ -69,7 +68,7 @@ Las pruebas usan archivos temporales propios y puertos libres. Cubren aislamient
 Para la prueba opcional con juegos de la colección, iniciar la aplicación en otra terminal y ejecutar:
 
 ```powershell
-npm run test:browser
+pnpm test:browser
 ```
 
 Requiere Microsoft Edge instalado. Abre navegadores de prueba sin ventana; usa Contra, Metal Slug, Sonic Eraser, Super Bomberman y Mario Kart 64 si están presentes. Compara el estado emulado de dos clientes NES en el mismo frame y guarda capturas/resultados en `test-results/`. El avance de frames solo prueba que el núcleo está ejecutándose: las capturas deben inspeccionarse, porque un núcleo puede mostrar un error de ROM mientras sigue avanzando. No es un benchmark de latencia de mando a pantalla ni una certificación de toda la colección.

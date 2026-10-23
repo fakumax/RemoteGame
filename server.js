@@ -417,7 +417,7 @@ function openBrowser(url) {
 if (require.main === module) {
   const game = createRemoteGame();
   const port = Number(process.env.PORT || cfg.port);
-  // --open (desktop shortcut, npm start): show the library in the browser.
+  // --open (desktop shortcut, pnpm start): show the library in the browser.
   const open = process.argv.includes('--open');
   if (open) process.title = 'RemoteGame';
   game.server.on('error', err => {
