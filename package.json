@@ -8,21 +8,18 @@
     "local": "node server.js --no-share",
     "netplay": "node netplay-node/index.js",
     "test": "node --test",
-    "setup": "npm ci && npm ci --prefix netplay-node",
     "test:browser": "node scripts/smoke-browser.cjs"
   },
   "dependencies": {
     "adm-zip": "^0.6.1",
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "ws": "^8.18.0"
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "ws": "^8.22.0"
   },
   "private": true,
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "socket.io-client": "^4.8.1"
+    "@playwright/test": "^1.64.1",
+    "socket.io-client": "^4.8.4"
   },
-  "overrides": {
-    "qs": "^6.16.0"
-  }
+  "packageManager": "pnpm@12.15.0"
 }
