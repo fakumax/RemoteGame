@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/style.css">
 <style>
 #wrap{position:relative;width:min(960px,100%);aspect-ratio:4/3;margin:12px auto;background:#000;border-radius:8px;overflow:hidden}
+#wrap:fullscreen{border-radius:0}
 #frame{position:relative;height:100%;aspect-ratio:4/3;max-width:100%;margin:0 auto}
 #screen{width:100%;height:100%;object-fit:contain;display:block;image-rendering:pixelated}
 #enter{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);color:#fff;font-size:20px;font-weight:700;border:0;cursor:pointer;width:100%}
@@ -38,9 +39,10 @@ body.touch #touch{display:grid}
 <script src="/webrtc.js"></script>
 <script src="/pads.js"></script>
 <script src="/crt.js"></script>
+<script src="/hud.js"></script>
 </head>
 <body>
-<header><h1>🎮 RemoteGame</h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="net" class="mut"></span><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="crt"></button><button class="copy" id="full">Pantalla completa</button></header>
+<header><h1>🎮 RemoteGame</h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="pad" class="mut"></span><span id="net" class="mut"></span><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="crt"></button><button class="copy" id="full">Pantalla completa</button></header>
 <main>
   <div class="panel" id="status">Conectando…</div>
   <div id="wrap"><div id="frame"><video id="screen" autoplay playsinline muted></video></div><button id="enter">▶ Tocá para entrar con sonido</button></div>
@@ -56,8 +58,9 @@ body.touch #touch{display:grid}
     </div>
   </div>
   <div class="panel kbd" id="help">
-    <b>Controles (P2):</b> mando USB/Bluetooth, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> · <kbd>Q</kbd> <kbd>W</kbd> · <kbd>Enter</kbd>=Start · <kbd>Shift</kbd>=Select/Moneda.<br>
-    Mando: botón de abajo/derecha/izquierda/arriba = B/A/Y/X (en Neo Geo: A/B/C/D). El juego corre en la PC del anfitrión; acá solo llega el video.
+    <b>Tus controles (P2):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
+    Mandos: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D). El juego corre en la PC del anfitrión: acá solo llega el video.<br>
+    Si tu mando no aparece arriba, apretá un botón con esta pestaña enfocada (el navegador lo oculta hasta entonces). Con Steam abierto, un mando de PlayStation se ve como uno de Xbox: es normal.
   </div>
 </main>
 <script>
@@ -70,12 +73,22 @@ body.touch #touch{display:grid}
   const crt=RemoteCRT.attach($('frame'),$('crt'));
   // Buttons work right away, even while the network setup below is still loading.
   $('enter').onclick=()=>{video.muted=false;video.play().catch(()=>{});$('enter').style.display='none';};
-  $('full').onclick=()=>{($('wrap').requestFullscreen||$('wrap').webkitRequestFullscreen).call($('wrap'));};
+  // Fullscreen on #wrap, not on the video: the CRT layer and the ping badge live inside it.
+  const wrap=$('wrap'), goFull=wrap.requestFullscreen||wrap.webkitRequestFullscreen;
+  if(goFull)$('full').onclick=()=>goFull.call(wrap);else $('full').style.display='none';
+  const ping=RemoteHUD.ping(wrap);
+  const track=RemotePads.padTracker();
+  let live=[];
   const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
   let ws=null, rtc=null, analog=false, seq=0, last=null, lastSent=0, keys={};
 
   const GAME_KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','ShiftLeft','ShiftRight','KeyZ','KeyX','KeyA','KeyS','KeyQ','KeyW'];
-  addEventListener('keydown',e=>{if(GAME_KEYS.includes(e.code))e.preventDefault();if(!keys[e.code]){keys[e.code]=true;poll();}});
+  // The arrows and Space must never scroll the page, wherever the focus is.
+  addEventListener('keydown',e=>{
+    if(e.ctrlKey||e.metaKey||e.altKey)return;
+    if(GAME_KEYS.includes(e.code))e.preventDefault();
+    if(!keys[e.code]){keys[e.code]=true;poll();}
+  });
   addEventListener('keyup',e=>{keys[e.code]=false;poll();});
   addEventListener('blur',()=>{keys={};poll();});
 
@@ -127,9 +140,10 @@ body.touch #touch{display:grid}
 
   // Controls travel as full state: a lost packet is fixed by the next one.
   function poll(){
+    // Runs even before the call is up, so the pad indicator and its activity check stay fresh.
+    live=track(navigator.getGamepads?navigator.getGamepads():[]);
     if(!rtc||!rtc.isOpen())return;
-    const pads=navigator.getGamepads?navigator.getGamepads():[];
-    const now=RemotePads.readGuest(Object.assign({},keys,touch),pads,analog);
+    const now=RemotePads.readGuest(Object.assign({},keys,touch),live,analog);
     const t=performance.now();
     if(last&&now.b===last.b&&now.x===last.x&&now.y===last.y&&t-lastSent<50)return;
     rtc.send({t:'pad',s:++seq,b:now.b,x:now.x,y:now.y});
@@ -137,8 +151,14 @@ body.touch #touch{display:grid}
   }
   setInterval(poll,4);
 
+  let padLine='';
+  setInterval(()=>{
+    const pads=navigator.getGamepads?navigator.getGamepads():[], text=RemotePads.padStatus(pads,live,false);
+    if(text!==padLine){padLine=text;$('pad').textContent=text;$('pad').title=Array.from(pads).filter(Boolean).map(g=>g.id).join('\n');}
+  },400);
+
   async function stats(){
-    if(!rtc||!rtc.pc)return;
+    if(!rtc||!rtc.pc){ping.hide();$('net').textContent='';return;}
     const report=await rtc.pc.getStats();let rtt=null,path='',fps=null,buffer=null;
     const candidates={};
     report.forEach(s=>{if(s.type==='local-candidate')candidates[s.id]=s.candidateType;});
@@ -147,10 +167,10 @@ body.touch #touch{display:grid}
       if(s.type==='inbound-rtp'&&s.kind==='video'){fps=s.framesPerSecond;if(s.jitterBufferEmittedCount)buffer=1000*s.jitterBufferDelay/s.jitterBufferEmittedCount;}
     });
     const parts=[];
-    if(rtt!=null)parts.push('ida y vuelta '+Math.round(rtt*1000)+' ms');
+    if(rtt!=null)ping.set(rtt*1000);else ping.hide();
     if(buffer!=null)parts.push('buffer '+Math.round(buffer)+' ms');
     if(fps!=null)parts.push(Math.round(fps)+' fps');
-    if(path)parts.push(path);
+    if(path)parts.push(path==='directo'?'conexión directa':'conexión por TURN');
     $('net').textContent=parts.join(' · ');
   }
   setInterval(stats,1000);
@@ -169,7 +189,7 @@ body.touch #touch{display:grid}
       sendSignal:data=>send({t:'signal',data}),
       onTrack:track=>{media.addTrack(track);video.play().catch(()=>{});},
       onOpen:()=>{clearTimeout(natTimer);setStatus('✅ Conectado. Jugás como P2.');seq=0;last=null;poll();},
-      onClose:()=>{if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');},
+      onClose:()=>{ping.hide();if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');},
       // The route under the call died (e.g. 4G dropped): rebuild it instead of waiting.
       onState:state=>{
         clearTimeout(dropTimer);
@@ -179,7 +199,7 @@ body.touch #touch{display:grid}
     });
     rtc.start();
     // No direct route between the two PCs and no TURN relay: nothing will flow.
-    natTimer=setTimeout(()=>{if(rtc&&!rtc.isOpen())setStatus('No se pudo conectar directo con el anfitrión (NAT/CGNAT).\nEl anfitrión tiene que configurar un servidor TURN (TURN_URLS en el servidor).');},15000);
+    natTimer=setTimeout(()=>{if(rtc&&!rtc.isOpen())setStatus('No se pudo conectar directo con el anfitrión (la red de alguno de los dos lo impide).\nHace falta un servidor TURN: el anfitrión lo configura con TURN_URLS en el servidor.');},15000);
   }
 
   // Permanent room: stay connected and follow whatever game the host opens.

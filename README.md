@@ -6,7 +6,7 @@ Biblioteca de ROMs para jugar desde un navegador. Lee la colección sin modifica
 
 ## Inicio
 
-Requiere Node.js 22 o posterior, pnpm (`corepack enable` lo activa, viene con Node), ngrok instalado con su authtoken e Internet para cargar EmulatorJS 4.2.3.
+Requiere Node.js 22.13 o posterior (usa `node:sqlite` para las portadas), pnpm (`corepack enable` lo activa, viene con Node), ngrok instalado con su authtoken e Internet para cargar EmulatorJS 4.2.3.
 
 ```powershell
 pnpm install
@@ -35,9 +35,12 @@ PlayStation 1 está excluida por elección del usuario. PS2, PS3, Dreamcast, Nao
 Hay **una sola sala, permanente**. Tu amigo abre el link una vez (desde PC o celu, sin instalar nada) y se queda ahí. Vos elegís un juego y tocás **▶ Jugar**; su pantalla muestra ese juego, y cuando volvés a la biblioteca y abrís otro, cambia sola, sin nuevo link ni recargar.
 
 - **Streaming:** el juego corre en tu pestaña, que transmite video y audio por WebRTC a resolución nativa. Tu amigo manda sus controles como P2 (teclado, mando o controles táctiles). No puede desincronizarse. Vos jugás sin retraso; tu amigo suma la ida y vuelta de la red más unos ms de codificación.
-- **Filtro CRT:** líneas de barrido, máscara RGB y viñeta dibujadas con CSS encima de la imagen, sin trabajo por cuadro. No entra en el video transmitido: cada uno lo prende o apaga en su pantalla (📺 CRT) y queda recordado en ese navegador.
+- **Filtro CRT:** líneas de barrido, máscara RGB y viñeta dibujadas con CSS encima de la imagen, sin trabajo por cuadro. No entra en el video transmitido: cada uno lo prende o apaga en su pantalla (📺 CRT) y queda recordado en ese navegador. Sigue visible en pantalla completa.
+- **Ping y mandos:** arriba a la derecha de la pantalla de juego (también en pantalla completa) se ve la latencia en verde, amarillo o rojo; no entra en el video. En el encabezado, un indicador dice qué mando detectó el navegador (DualSense, Xbox…): los navegadores lo muestran recién cuando apretás un botón con la pestaña enfocada. Teclado y mandos se leen en la propia página, sin depender del foco, así que las flechas no mueven la página.
 - **Cambio de red:** si el invitado pasa de WiFi a 4G (o al revés) o se corta la ruta, la sala se reconecta sola por la red nueva; también hay un botón 🔄 Reconectar.
-- **Nombres completos:** la biblioteca muestra y busca por el título de LaunchBox (`Data/Platforms/*.xml`, solo lectura; `LAUNCHBOX_DIR` cambia la carpeta). Los juegos que no están en LaunchBox usan el nombre del archivo sin marcas como `[!]`.
+- **Nombres completos:** la biblioteca muestra y busca por el título de LaunchBox (`Data/Platforms/*.xml`, solo lectura; `LAUNCHBOX_DIR` cambia la carpeta). Los juegos que no están en LaunchBox usan el nombre del archivo sin marcas como `[!]` o `(U)`.
+- **Biblioteca:** las consolas están en un panel lateral y la búsqueda recorre todas (con una consola elegida, los resultados de otras aparecen debajo, en *En otras consolas*). La consola y la búsqueda se recuerdan al volver desde un juego. `GET /api/games` acepta `system` (`all` para todas), `q`, `limit`, `offset` y `not` (excluye una consola).
+- **Portadas:** se buscan en `LaunchBox/Metadata/LaunchBox.Metadata.db` (solo lectura) por el ID de LaunchBox o, si el juego no está en sus listas, por título exacto dentro de la consola; orden de imagen: caja frontal (Norteamérica y Mundo primero), caja reconstruida, caja de fans, flyer, pantalla de título, juego y marquesina. Cada imagen se baja una vez de `images.launchbox-app.com`, se achica con `sharp` a WebP de hasta 400 px de ancho (unos 35 KB cada una) y se guarda en `cache/covers/`: toda la colección ronda los 80 MB, y la carpeta se puede borrar sin problema. Si `sharp` no carga, se guarda la imagen original. Sin la base de LaunchBox todo funciona, con un recuadro de color en lugar de portada.
 - **Tu pestaña tiene que quedar visible:** minimizada, el navegador frena el juego para los dos.
 - **Solo tu PC es anfitriona.** Quien entra por el link cae en la sala (`/sala`), no en la biblioteca, y no puede abrir juegos ni subir ROMs.
 - **2P en la misma PC:** desde la página del juego, *Jugar 2P en esta PC* (mando 1 y 2, o teclado compartido: P1 `WASD` + `F G R T`, P2 flechas + `K L I O`).
@@ -75,4 +78,4 @@ pnpm test:browser
 
 Requiere Microsoft Edge instalado. Abre navegadores de prueba sin ventana; usa Contra, Metal Slug, Sonic Eraser, Super Bomberman y Mario Kart 64 si están presentes. Compara el estado emulado de dos clientes NES en el mismo frame y guarda capturas/resultados en `test-results/`. El avance de frames solo prueba que el núcleo está ejecutándose: las capturas deben inspeccionarse, porque un núcleo puede mostrar un error de ROM mientras sigue avanzando. No es un benchmark de latencia de mando a pantalla ni una certificación de toda la colección.
 
-`roms/`, dependencias, capturas, registros y archivos `.env` están excluidos de Git.
+`roms/`, `cache/`, dependencias, capturas, registros y archivos `.env` están excluidos de Git.

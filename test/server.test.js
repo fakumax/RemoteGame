@@ -7,8 +7,14 @@ const { once } = require('node:events');
 const { WebSocket } = require('ws');
 const { io } = require('socket.io-client');
 const AdmZip = require('adm-zip');
+const { DatabaseSync } = require('node:sqlite');
 const { createRemoteGame } = require('../server');
 let temp, game, base;
+// Covers: the download is simulated, so these tests never touch the Internet.
+const downloads = [];
+// A real 1000x1400 PNG (cover art is big), so the resize to a small WebP is exercised too.
+const sharp = require('sharp');
+const fakeCover = async name => { downloads.push(name); await new Promise(r => setTimeout(r, 20)); return sharp({ create: { width: 1000, height: 1400, channels: 3, background: '#c33' } }).png().toBuffer(); };
 const clients = [];
 before(async () => {
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'remotegame-test-'));
@@ -21,11 +27,24 @@ before(async () => {
   zip.writeZip(path.join(temp,'MAME','Roms','neogeo.zip'));
   fs.writeFileSync(path.join(temp,'NES','secret.txt'),'not a rom');
   fs.writeFileSync(path.join(temp,'NES','Other_Game (U) [!].nes'), Buffer.from('NES\x1a'));
+  // The same title in two consoles, plus SNES games that LaunchBox's metadata knows by name only.
+  fs.mkdirSync(path.join(temp,'Super Nintendo','Roms'),{recursive:true});
+  for(const f of ['Other Game (E).smc','Addams Family, The (U).smc','No Cover (U).smc'])fs.writeFileSync(path.join(temp,'Super Nintendo','Roms',f), Buffer.from('smc'));
   // A LaunchBox list with the full title for test.nes, path relative to the LaunchBox folder.
   fs.mkdirSync(path.join(temp,'LaunchBox','Data','Platforms'),{recursive:true});
   fs.writeFileSync(path.join(temp,'LaunchBox','Data','Platforms','NES.xml'),
-    '<?xml version="1.0"?><LaunchBox><Game><ApplicationPath>..\\NES\\test.nes</ApplicationPath><Title>Rock &amp; Roll Racing</Title><ReleaseDate>1993-06-01T00:00:00</ReleaseDate></Game></LaunchBox>');
-  game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'LaunchBox') });
+    '<?xml version="1.0"?><LaunchBox><Game><ApplicationPath>..\\NES\\test.nes</ApplicationPath><Title>Rock &amp; Roll Racing</Title><ReleaseDate>1993-06-01T00:00:00</ReleaseDate><DatabaseID>2</DatabaseID><Platform>Nintendo Entertainment System</Platform></Game></LaunchBox>');
+  // A tiny copy of LaunchBox's metadata database.
+  fs.mkdirSync(path.join(temp,'LaunchBox','Metadata'),{recursive:true});
+  const db=new DatabaseSync(path.join(temp,'LaunchBox','Metadata','LaunchBox.Metadata.db'));
+  db.exec('CREATE TABLE Games (DatabaseID INTEGER PRIMARY KEY, Name TEXT, ReleaseType TEXT, Platform TEXT);'+
+    'CREATE TABLE GameImages (FileName TEXT PRIMARY KEY, DatabaseId INTEGER, Type TEXT, Region TEXT);'+
+    'CREATE TABLE GameAlternateTitles (AlternateName TEXT, DatabaseID INTEGER, Region TEXT);'+
+    "INSERT INTO Games VALUES (1,'Other Game','Released','Super Nintendo Entertainment System'),(2,'Rock n Roll Racing','Released','Nintendo Entertainment System'),(3,'The Addams Family','Released','Super Nintendo Entertainment System'),(4,'Other Game','ROM Hack','Super Nintendo Entertainment System');"+
+    "INSERT INTO GameImages VALUES ('aaaa-1.png',1,'Box - Front','Japan'),('bbbb-1.jpg',1,'Box - Front','North America'),('cccc-1.jpg',1,'Screenshot - Gameplay','World'),('dddd-2.jpg',2,'Box - Front','World'),('eeee-3.png',3,'Box - Front - Reconstructed',''),('ffff-4.jpg',4,'Box - Front','World'),('../evil.jpg',3,'Box - Front','World');"+
+    "INSERT INTO GameAlternateTitles VALUES ('Addams Family Values Old',3,'');");
+  db.close();
+  game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'LaunchBox'),coverCacheDir:path.join(temp,'covers'),fetchCover:fakeCover });
   game.server.listen(0,'127.0.0.1');await once(game.server,'listening');
   base='http://127.0.0.1:'+game.server.address().port;
 });
@@ -71,7 +90,7 @@ test('Names: full titles from LaunchBox, searchable by title or file; others tid
   const all=await (await fetch(base+'/api/games?system=nes')).json();
   const byFile=Object.fromEntries(all.games.map(g=>[g.file,g]));
   assert.equal(byFile['test.nes'].name,'Rock & Roll Racing');assert.equal(byFile['test.nes'].year,'1993');
-  assert.equal(byFile['Other_Game (U) [!].nes'].name,'Other Game (U)');
+  assert.equal(byFile['Other_Game (U) [!].nes'].name,'Other Game');
   for(const q of ['roll racing','test'])assert.deepEqual((await (await fetch(base+'/api/games?system=nes&q='+encodeURIComponent(q))).json()).games.map(g=>g.file),['test.nes']);
 });
 test('NES: waits for both ROMs, rejects P3, enforces host and reset generation',async()=>{
@@ -151,4 +170,74 @@ test('Local transport latency: 100 actual round trips (not Internet or input-to-
   samples.sort((a,b)=>a-b);
   t.diagnostic('Socket.IO loopback RTT median='+samples[50].toFixed(2)+'ms p95='+samples[95].toFixed(2)+'ms');
   assert.equal(samples.length,100);
+});
+test('Search: every console at once, the same title shows once per console, pages with offset',async()=>{
+  const get=async url=>(await fetch(base+url)).json();
+  const all=await get('/api/games?system=all&q=other%20game');
+  assert.equal(all.total,2);assert.deepEqual(all.games.map(g=>g.system).sort(),['nes','snes']);
+  const bySystem=Object.fromEntries(all.games.map(g=>[g.system,g]));
+  assert.equal(bySystem.snes.systemLabel,'Super Nintendo');assert.equal(bySystem.nes.systemLabel,'NES / Family');
+  assert.equal(bySystem.nes.play,'/play-ejs.html?system=nes&file='+encodeURIComponent('Other_Game (U) [!].nes')+'&core=nes');
+  assert.equal(bySystem.snes.play,'/play-ejs.html?system=snes&file='+encodeURIComponent('Other Game (E).smc'));
+  // "not" leaves a console out (the "other consoles" section); one console still works as before.
+  assert.deepEqual((await get('/api/games?system=all&q=other%20game&not=snes')).games.map(g=>g.system),['nes']);
+  assert.equal((await get('/api/games?system=snes&q=other%20game')).total,1);
+  // Several words in any order, no accents or punctuation needed.
+  assert.equal((await get('/api/games?system=all&q=racing%20ROLL')).total,1);
+  assert.equal((await get('/api/games?system=all&q=zzzz')).total,0);
+  // Pages: offset moves through the sorted list without repeating or skipping.
+  const full=(await get('/api/games?system=all&limit=100')).games.map(g=>g.system+'/'+g.file);
+  assert.ok(full.length>=5);
+  const paged=[];
+  for(let offset=0;offset<full.length;offset+=2){const r=await get('/api/games?system=all&limit=2&offset='+offset);assert.equal(r.total,full.length);assert.equal(r.offset,offset);paged.push(...r.games.map(g=>g.system+'/'+g.file));}
+  assert.deepEqual(paged,full);
+  assert.equal((await get('/api/games?system=nes&limit=1&offset=99')).games.length,0);
+  assert.equal((await fetch(base+'/api/games?system=nope')).status,400);
+  const systems=(await get('/api/systems')).systems;assert.equal(systems.find(s=>s.id==='snes').count,3);assert.notEqual(systems.find(s=>s.id==='n64').missing,null);
+});
+test('One game by system and file: same JSON as the list, 404 when missing, 400 when invalid',async()=>{
+  const listed=(await (await fetch(base+'/api/games?system=snes&q=other%20game')).json()).games[0];
+  const one=await fetch(base+'/api/game/snes/'+encodeURIComponent(listed.file));
+  assert.equal(one.status,200);assert.deepEqual(await one.json(),listed);
+  assert.equal((await fetch(base+'/api/game/snes/nope.smc')).status,404);
+  assert.equal((await fetch(base+'/api/game/snes/'+'a%3Ab')).status,400);
+  assert.equal((await fetch(base+'/api/game/nope/x.nes')).status,400);
+});
+test('Covers: validated, resolved from LaunchBox metadata, downloaded once and cached',async()=>{
+  const nes=(await (await fetch(base+'/api/games?system=nes&q=rock')).json()).games[0];
+  assert.match(nes.cover,/^\/api\/cover\/nes\/.+\?v=dddd-2-400$/);
+  const snes=Object.fromEntries((await (await fetch(base+'/api/games?system=snes')).json()).games.map(g=>[g.file,g]));
+  // Preferred image: box art from North America over Japan, over any screenshot; the ROM hack with the same title never wins.
+  assert.match(snes['Other Game (E).smc'].cover,/\?v=bbbb-1-400$/);
+  // "Addams Family, The" matches "The Addams Family" by name.
+  assert.match(snes['Addams Family, The (U).smc'].cover,/\?v=eeee-3-400$/);
+  assert.equal(snes['No Cover (U).smc'].cover,null);
+  const before=downloads.length;
+  const [a,b]=await Promise.all([fetch(base+nes.cover),fetch(base+nes.cover)]);
+  assert.equal(a.status,200);assert.equal(b.status,200);
+  assert.match(a.headers.get('content-type'),/^image\/webp/);
+  assert.match(a.headers.get('cache-control'),/immutable/);
+  // Stored small: WebP, 400 px wide, proportions kept; the original is not kept.
+  const meta=await sharp(Buffer.from(await a.arrayBuffer())).metadata();
+  assert.deepEqual([meta.format,meta.width,meta.height],['webp',400,560]);
+  assert.equal(downloads.at(-1),'dddd-2.jpg');
+  assert.equal(downloads.length-before,1);
+  assert.equal((await fetch(base+nes.cover)).status,200);assert.equal(downloads.length-before,1);
+  assert.equal(fs.existsSync(path.join(temp,'covers','dddd-2.webp')),true);
+  assert.deepEqual(fs.readdirSync(path.join(temp,'covers')).filter(f=>!f.endsWith('.webp')),[]);
+  // Rejected: unknown console, bad names, files not in the collection, consoles without covers.
+  for(const url of ['/api/cover/constructor/test.nes','/api/cover/nes/foo%5Cbar.nes','/api/cover/nes/..%2Fx.nes'])assert.equal((await fetch(base+url)).status,400,url);
+  for(const url of ['/api/cover/nes/missing.nes','/api/cover/subidos/genesis.zip','/api/cover/snes/No%20Cover%20(U).smc','/api/cover/nes/secret.txt'])assert.equal((await fetch(base+url)).status,404,url);
+  // A name from the database that is not a plain image file name is never used.
+  assert.equal(downloads.every(n=>/^[\w-]+\.(png|jpe?g|webp)$/.test(n)),true);
+});
+test('Covers: without LaunchBox metadata everything works, with no covers',async()=>{
+  const bare=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'nothing-here'),coverCacheDir:path.join(temp,'covers2'),fetchCover:fakeCover });
+  bare.server.listen(0,'127.0.0.1');await once(bare.server,'listening');
+  try{
+    const url='http://127.0.0.1:'+bare.server.address().port;
+    const list=await (await fetch(url+'/api/games?system=all')).json();
+    assert.ok(list.total>=5);assert.equal(list.games.every(g=>g.cover===null),true);
+    assert.equal((await fetch(url+'/api/cover/nes/test.nes')).status,404);
+  }finally{await bare.close();}
 });

@@ -26,11 +26,11 @@ const game = { publicUrl: null };
 
 // Sistemas. dir de GAMES = lectura. Solo 'subidos' permite escritura.
 const SYSTEMS = {
-  nes:     { label: 'NES / Family', dir: path.join(GAMES_ROOT, 'NES'), exts: ['.nes', '.zip'], ejs: 'nes' },
-  genesis: { label: 'Sega Genesis', dir: path.join(GAMES_ROOT, 'Sega Genesis'), exts: ['.bin', '.md', '.smd', '.gen', '.zip'], ejs: 'segaMD' },
-  arcade:  { label: 'Arcade / Neo Geo', dir: path.join(GAMES_ROOT, 'MAME', 'Roms'), exts: ['.zip'], ejs: 'fbneo' },
-  snes: { label: 'Super Nintendo', dir: path.join(GAMES_ROOT, 'Super Nintendo', 'Roms'), exts: ['.sfc', '.smc', '.zip'], ejs: 'snes' },
-  n64: { label: 'Nintendo 64', dir: path.join(GAMES_ROOT, 'Nintendo 64', 'Roms'), exts: ['.z64', '.n64', '.v64', '.zip'], ejs: 'n64' },
+  nes:     { label: 'NES / Family', dir: path.join(GAMES_ROOT, 'NES'), exts: ['.nes', '.zip'], ejs: 'nes', lb: 'Nintendo Entertainment System' },
+  genesis: { label: 'Sega Genesis', dir: path.join(GAMES_ROOT, 'Sega Genesis'), exts: ['.bin', '.md', '.smd', '.gen', '.zip'], ejs: 'segaMD', lb: 'Sega Genesis' },
+  arcade:  { label: 'Arcade / Neo Geo', dir: path.join(GAMES_ROOT, 'MAME', 'Roms'), exts: ['.zip'], ejs: 'fbneo', lb: 'Arcade' },
+  snes: { label: 'Super Nintendo', dir: path.join(GAMES_ROOT, 'Super Nintendo', 'Roms'), exts: ['.sfc', '.smc', '.zip'], ejs: 'snes', lb: 'Super Nintendo Entertainment System' },
+  n64: { label: 'Nintendo 64', dir: path.join(GAMES_ROOT, 'Nintendo 64', 'Roms'), exts: ['.z64', '.n64', '.v64', '.zip'], ejs: 'n64', lb: 'Nintendo 64' },
   subidos: { label: 'Subidos', dir: LOCAL_ROMS, exts: ['.nes', '.zip', '.bin', '.md', '.smd', '.gen'], writable: true }
 };
 
@@ -63,42 +63,233 @@ function launchBoxTitles() {
     for (const block of xml.split('<Game>').slice(1)) {
       const app = xmlText(block, 'ApplicationPath'), title = xmlText(block, 'Title');
       if (!app || !title) continue;
-      next.set(path.resolve(LAUNCHBOX, app).toLowerCase(), { title, year: xmlText(block, 'ReleaseDate').slice(0, 4) });
+      next.set(path.resolve(LAUNCHBOX, app).toLowerCase(), { title, year: xmlText(block, 'ReleaseDate').slice(0, 4), id: Number(xmlText(block, 'DatabaseID')) || 0, platform: xmlText(block, 'Platform') });
     }
   }
   titles = next; titlesStamp = stamp;
   return titles;
 }
+// Not in LaunchBox: tidy the file name, dropping dump tags like [!] or [T+Spa1.0] and
+// region tags like (U); "Addams Family, The - X" reads "The Addams Family - X".
+function tidyName(file) {
+  const tags = [];
+  const name = file.replace(/\.[^.]+$/, '').replace(/\s*\[[^\]]*\]/g, '').replace(/\s*\(([^)]*)\)/g, (m, tag) => { tags.push(tag.trim()); return ''; })
+    .replace(/_+/g, ' ').replace(/\s+/g, ' ').trim().replace(/^(.+?), (The|A|An)( - .*)?$/i, (m, rest, article, sub) => article + ' ' + rest + (sub || ''));
+  return { name, tag: tags.join(' · ') };
+}
 function gameInfo(sys, file) {
   const known = launchBoxTitles().get(path.join(sys.dir, file).toLowerCase());
-  // Not in LaunchBox: tidy the file name, dropping dump tags like [!] or [T+Spa1.0].
-  const tidy = file.replace(/\.[^.]+$/, '').replace(/\s*\[[^\]]*\]/g, '').replace(/_+/g, ' ').trim();
-  return { name: known ? known.title : tidy || file, year: known ? known.year : '' };
+  const tidy = tidyName(file);
+  return { name: known ? known.title : tidy.name || file, year: known ? known.year : '', tag: tidy.tag };
 }
-function listGames(sysId, q, limit) {
-  const sys = getSys(sysId);
-  if (!sys) return { total: 0, games: [] };
+
+// Per-folder listing cache: one readdir + stat per file, redone only when the folder
+// (or LaunchBox's lists) change, so searching every console on each keystroke stays cheap.
+const collator = new Intl.Collator();
+const sysIndex = new Map();
+// Lowercase, no accents or punctuation: "Pac-Man" and "pacman" look the same.
+const squash = s => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '');
+function systemItems(id) {
+  const sys = SYSTEMS[id];
+  let dirStat;
+  try { dirStat = fs.statSync(sys.dir); } catch (e) { sysIndex.delete(id); return null; }
+  const known = launchBoxTitles();
+  const hit = sysIndex.get(id);
+  if (hit && hit.mtime === dirStat.mtimeMs && hit.titles === known && Date.now() - hit.at < 60000) return hit;
   let files = [];
-  try { files = fs.readdirSync(sys.dir); } catch (e) { return { total: 0, games: [], missing: sys.dir }; }
-  const exts = sys.exts;
-  let out = [];
-  const needle = String(q || '').toLowerCase();
+  try { files = fs.readdirSync(sys.dir); } catch (e) { sysIndex.delete(id); return null; }
+  const items = [];
   for (const f of files) {
     const low = f.toLowerCase();
     // BIOS and sound/CPU device sets: needed by some games, not playable on their own.
-    if (sysId === 'arcade' && /^(neogeo|pgm|skns|stvbios|qsound|qsound_hle|m68705p5|namcoc76|tms320c32|ym2413|sys246|sys256|coh1002m)\.zip$/i.test(f)) continue;
-    if (!exts.some(e => low.endsWith(e))) continue;
-    const { name, year } = gameInfo(sys, f);
-    // Search the full title and the file name: "metal slug" and "mslug" both work.
-    if (needle && low.indexOf(needle) < 0 && name.toLowerCase().indexOf(needle) < 0) continue;
+    if (id === 'arcade' && /^(neogeo|pgm|skns|stvbios|qsound|qsound_hle|m68705p5|namcoc76|tms320c32|ym2413|sys246|sys256|coh1002m)\.zip$/i.test(f)) continue;
+    if (!sys.exts.some(e => low.endsWith(e))) continue;
     let size = 0;
     try { const stat = fs.statSync(path.join(sys.dir, f)); if (!stat.isFile()) continue; size = stat.size; } catch (e) { continue; }
-    out.push({ file: f, name, year, size });
+    const { name, year, tag } = gameInfo(sys, f);
+    // Search the full title and the file name: "metal slug" and "mslug" both work.
+    items.push({ file: f, name, year, size, tag, hay: squash(name) + ' ' + squash(f), system: id });
   }
-  out.sort((a, b) => a.name.localeCompare(b.name));
+  items.sort((a, b) => collator.compare(a.name, b.name) || collator.compare(a.file, b.file));
+  // Same title twice in one console (US and Europe dumps): tell them apart by region tag.
+  const seen = new Map();
+  for (const it of items) seen.set(it.name, (seen.get(it.name) || 0) + 1);
+  for (const it of items) if (seen.get(it.name) > 1 && it.tag) it.variant = it.tag;
+  const next = { mtime: dirStat.mtimeMs, titles: known, at: Date.now(), items, byFile: new Map(items.map(it => [it.file, it])) };
+  sysIndex.set(id, next);
+  return next;
+}
+function gameJson(it) {
+  const sys = SYSTEMS[it.system];
+  const core = it.system === 'nes' || (it.system === 'subidos' && /\.nes$/i.test(it.file)) ? '&core=nes' : '';
+  const cover = coverName(it.system, it.file);
+  const out = {
+    file: it.file, name: it.name, year: it.year, size: it.size, system: it.system, systemLabel: sys.label,
+    play: '/play-ejs.html?system=' + it.system + '&file=' + encodeURIComponent(it.file) + core,
+    cover: cover ? '/api/cover/' + it.system + '/' + encodeURIComponent(it.file) + '?v=' + cover.replace(/\.\w+$/, '') + '-' + COVER_WIDTH : null
+  };
+  if (it.variant) out.variant = it.variant;
+  return out;
+}
+// sysId 'all' joins every console (minus `not`), same title in two consoles shows twice.
+function listGames(sysId, q, limit, offset, not) {
+  const ids = sysId === 'all' ? Object.keys(SYSTEMS).filter(id => id !== not) : getSys(sysId) ? [sysId] : [];
+  if (!ids.length) return { total: 0, games: [] };
+  let out = [], missing = null;
+  for (const id of ids) {
+    const index = systemItems(id);
+    if (!index) { missing = SYSTEMS[id].dir; continue; }
+    out = out.length ? out.concat(index.items) : index.items;
+  }
+  if (sysId !== 'all' && missing) return { total: 0, games: [], missing };
+  const terms = String(q || '').split(/\s+/).map(squash).filter(Boolean);
+  if (terms.length) out = out.filter(it => terms.every(t => it.hay.includes(t)));
+  if (ids.length > 1) out = out.slice().sort((a, b) => collator.compare(a.name, b.name) || collator.compare(SYSTEMS[a.system].label, SYSTEMS[b.system].label) || collator.compare(a.file, b.file));
   const total = out.length;
-  if (limit && out.length > limit) out = out.slice(0, limit);
-  return { total, games: out };
+  out = out.slice(offset || 0, limit ? (offset || 0) + limit : undefined);
+  return { total, games: out.map(gameJson) };
+}
+
+// Covers: LaunchBox's metadata (read only SQLite) says which image belongs to a game; the
+// image itself is downloaded once from LaunchBox's CDN into ./cache/covers and served from there.
+const COVER_CACHE = path.resolve(options.coverCacheDir || path.join(__dirname, 'cache', 'covers'));
+const COVER_MAX = 24 * 1024 * 1024;
+// Covers are stored small: WebP, 400 px wide at most (a card is ~190 px, sharp on 2x screens).
+const COVER_WIDTH = 400;
+let sharpLib;
+function coverSharp() {
+  if (sharpLib === undefined) { try { sharpLib = require('sharp'); } catch (e) { sharpLib = null; } }
+  return sharpLib;
+}
+// Without sharp the original image is kept as is.
+const coverFile = name => coverSharp() ? name.replace(/\.\w+$/, '.webp') : name;
+// First match wins: box art, then a fan box, then a flyer, then a title or gameplay shot, marquee last.
+const COVER_TYPES = ['Box - Front', 'Box - Front - Reconstructed', 'Fanart - Box - Front', 'Advertisement Flyer - Front', 'Screenshot - Game Title', 'Screenshot - Gameplay', 'Arcade - Marquee'];
+const COVER_REGIONS = ['North America', 'United States', 'World'];
+const COVER_FILE = /^[\w-]+\.(png|jpe?g|webp)$/i;
+const articles = new Set(['the', 'a', 'an']);
+const roman = { ii: '2', iii: '3', iv: '4', vi: '6', vii: '7', viii: '8', ix: '9' };
+// "The Legend of Zelda: A Link to the Past" and "Legend of Zelda, The - Link to the Past (U)" match.
+function matchKey(title) {
+  return title.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/['’`]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(w => !articles.has(w)).map(w => roman[w] || w).join(' ');
+}
+let lbDb;
+let lbStmts = null;
+const lbNames = new Map();
+function coverDb() {
+  if (lbDb) return lbDb;
+  const file = path.join(LAUNCHBOX, 'Metadata', 'LaunchBox.Metadata.db');
+  if (!fs.existsSync(file)) return null;
+  try {
+    // The one-time "SQLite is an experimental feature" notice is noise for the user; other warnings stay.
+    const emit = process.emitWarning;
+    process.emitWarning = (w, ...rest) => /SQLite is an experimental/.test(String(w)) || emit.call(process, w, ...rest);
+    let DatabaseSync;
+    try { ({ DatabaseSync } = require('node:sqlite')); } finally { process.emitWarning = emit; }
+    lbDb = new DatabaseSync(file, { readOnly: true });
+    lbStmts = {
+      images: lbDb.prepare('SELECT FileName, Type, Region FROM GameImages WHERE DatabaseId = ?'),
+      games: lbDb.prepare('SELECT DatabaseID AS id, Name AS name, ReleaseType AS type FROM Games WHERE Platform = ?'),
+      alts: lbDb.prepare('SELECT a.AlternateName AS name, a.DatabaseID AS id FROM GameAlternateTitles a JOIN Games g ON g.DatabaseID = a.DatabaseID WHERE g.Platform = ?')
+    };
+  } catch (e) { lbDb = null; return null; }
+  return lbDb;
+}
+// Best image for a LaunchBox game id: type order above, then the preferred regions.
+function bestImage(id) {
+  const rows = lbStmts.images.all(id).filter(r => COVER_FILE.test(r.FileName) && COVER_TYPES.includes(r.Type));
+  let best = null, bestRank = Infinity;
+  for (const r of rows) {
+    const region = COVER_REGIONS.indexOf(r.Region);
+    const rank = COVER_TYPES.indexOf(r.Type) * 10 + (region < 0 ? 5 : region);
+    if (rank < bestRank) { best = r.FileName; bestRank = rank; }
+  }
+  return best;
+}
+// Games of one LaunchBox platform by normalized title (alternate titles too), ROM hacks last.
+function platformNames(platform) {
+  if (lbNames.has(platform)) return lbNames.get(platform);
+  const rank = { Released: 0, Unlicensed: 1, Unreleased: 1, DLC: 2, Homebrew: 2, 'ROM Hack': 3 };
+  const map = new Map();
+  const add = (key, id, r) => { if (!key) return; const list = map.get(key) || []; list.push({ id, r }); map.set(key, list); };
+  for (const g of lbStmts.games.all(platform)) add(matchKey(g.name), g.id, rank[g.type] ?? 1);
+  for (const a of lbStmts.alts.all(platform)) add(matchKey(a.name), a.id, 4);
+  lbNames.set(platform, map);
+  return map;
+}
+const coverCache = new Map();
+let coverStamp = null;
+// File name of the cover image for a ROM, or null (no database, no safe match, no image).
+function coverName(sysId, file) {
+  if (!SYSTEMS[sysId].lb || !coverDb()) return null;
+  const known = launchBoxTitles();
+  if (known !== coverStamp) { coverCache.clear(); coverStamp = known; }
+  const key = sysId + '/' + file;
+  if (coverCache.has(key)) return coverCache.get(key);
+  let name = null;
+  try {
+    const entry = known.get(path.join(SYSTEMS[sysId].dir, file).toLowerCase());
+    // In a LaunchBox list: its id is exact. Otherwise only an exact title match counts (arcade names are MAME codes).
+    const ids = entry && entry.id ? [entry.id] : [];
+    if (sysId !== 'arcade') {
+      const list = platformNames(SYSTEMS[sysId].lb).get(matchKey(tidyName(file).name)) || [];
+      ids.push(...list.slice().sort((a, b) => a.r - b.r || a.id - b.id).map(c => c.id));
+    }
+    for (const id of ids) { name = bestImage(id); if (name) break; }
+  } catch (e) { name = null; }
+  coverCache.set(key, name);
+  return name;
+}
+// Downloads one image from LaunchBox's CDN (the default `fetchCover`), refusing anything that is not a small image.
+async function downloadCover(name) {
+  const r = await fetch('https://images.launchbox-app.com/' + name, { signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!/^image\//i.test(r.headers.get('content-type') || '')) throw new Error('no es una imagen');
+  const chunks = []; let size = 0;
+  for await (const chunk of r.body) {
+    size += chunk.length;
+    if (size > COVER_MAX) throw new Error('imagen demasiado grande');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+const fetchCover = options.fetchCover || downloadCover;
+const coverJobs = new Map(), coverFails = new Map();
+let coverBusy = 0;
+const coverQueue = [];
+// A few downloads at a time; the same image asked twice shares one download.
+function ensureCover(name) {
+  const full = path.join(COVER_CACHE, coverFile(name));
+  if (fs.existsSync(full)) return Promise.resolve(full);
+  if (coverFails.get(name) > Date.now()) return Promise.reject(new Error('reintento pendiente'));
+  if (coverJobs.has(name)) return coverJobs.get(name);
+  const job = new Promise((resolve, reject) => coverQueue.push({ name, full, resolve, reject }));
+  coverJobs.set(name, job);
+  job.catch(() => {}).finally(() => coverJobs.delete(name));
+  pumpCovers();
+  return job;
+}
+function pumpCovers() {
+  while (coverBusy < 4 && coverQueue.length) {
+    const { name, full, resolve, reject } = coverQueue.shift();
+    coverBusy++;
+    (async () => {
+      fs.mkdirSync(COVER_CACHE, { recursive: true });
+      const tmp = full + '.' + process.pid + '.tmp';
+      try {
+        let data = await fetchCover(name);
+        if (coverSharp()) data = await coverSharp()(data).resize({ width: COVER_WIDTH, withoutEnlargement: true, fit: 'inside' }).webp({ quality: 80 }).toBuffer();
+        fs.writeFileSync(tmp, data);
+        fs.renameSync(tmp, full);
+        resolve(full);
+      } catch (e) {
+        try { fs.unlinkSync(tmp); } catch (e2) {}
+        coverFails.set(name, Date.now() + 60000);
+        reject(e);
+      } finally { coverBusy--; pumpCovers(); }
+    })();
+  }
 }
 
 const app = express();
@@ -114,18 +305,49 @@ app.get('/api/systems', (req, res) => {
   res.json({
     gamesRoot: GAMES_ROOT,
     systems: Object.keys(SYSTEMS).map(id => {
-      const r = listGames(id, '', 100000);
-      return { id, label: SYSTEMS[id].label, count: r.total, writable: !!SYSTEMS[id].writable, core: SYSTEMS[id].ejs || null, onlinePlayers: 2, onlineExperimental: id !== 'nes', missing: r.missing || null };
+      const index = systemItems(id);
+      return { id, label: SYSTEMS[id].label, count: index ? index.items.length : 0, writable: !!SYSTEMS[id].writable, core: SYSTEMS[id].ejs || null, onlinePlayers: 2, onlineExperimental: id !== 'nes', missing: index ? null : SYSTEMS[id].dir };
     })
   });
 });
 
 app.get('/api/games', (req, res) => {
   const sysId = String(req.query.system || 'nes').toLowerCase();
-  const sys = getSys(sysId);
+  // system=all searches every console; not=<id> leaves one out (the "other consoles" section).
+  const sys = sysId === 'all' ? { label: 'Todas' } : getSys(sysId);
   if (!sys) return res.status(400).json({ error: 'sistema invalido' });
-  const r = listGames(sysId, req.query.q || '', Math.min(Number(req.query.limit) || 200, 2000));
-  res.json({ system: sysId, label: sys.label, dir: sys.writable ? sys.dir : '(solo lectura)', total: r.total, games: r.games, missing: r.missing || null });
+  const limit = Math.min(Number(req.query.limit) || 200, 2000), offset = Math.max(Number(req.query.offset) || 0, 0);
+  const r = listGames(sysId, String(req.query.q || ''), limit, offset, String(req.query.not || '').toLowerCase());
+  res.json({ system: sysId, label: sys.label, dir: sys.writable ? sys.dir : '(solo lectura)', total: r.total, offset, games: r.games, missing: r.missing || null });
+});
+
+// One game, same JSON as the list (the player page shows its title instead of the file name).
+app.get('/api/game/:system/:file', (req, res) => {
+  const sys = getSys(req.params.system);
+  const f = safeFile(req.params.file);
+  if (!sys || !f) return res.status(400).json({ error: 'sistema o archivo invalido' });
+  const index = systemItems(req.params.system.toLowerCase());
+  const it = index && index.byFile.get(f);
+  if (!it) return res.status(404).json({ error: 'juego no encontrado' });
+  res.json(gameJson(it));
+});
+
+// Cover image of a game in the collection. Public on purpose (the page shows it to guests
+// too), but only images LaunchBox lists for games that exist here are ever downloaded.
+app.get('/api/cover/:system/:file', async (req, res) => {
+  const sys = getSys(req.params.system);
+  const f = safeFile(req.params.file);
+  if (!sys || !f) return res.status(400).send('sistema o archivo invalido');
+  const index = systemItems(req.params.system.toLowerCase());
+  const name = index && index.byFile.has(f) ? coverName(req.params.system.toLowerCase(), f) : null;
+  if (!name) return res.status(404).send('sin portada');
+  try {
+    const full = await ensureCover(name);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(full, { cacheControl: false });
+  } catch (e) {
+    res.status(502).send('no se pudo bajar la portada');
+  }
 });
 
 // Sirve ROM en modo lectura. NES .zip -> extrae el .nes en memoria (para jsnes).
@@ -197,6 +419,7 @@ app.post('/api/upload', (req, res, next) => fromThisPc(req) ? next() : res.statu
     try { fs.unlinkSync(req.file.path); } catch (e2) {}
     return res.status(500).json({ ok: false, msg: 'no se pudo guardar' });
   }
+  sysIndex.delete('subidos');
   res.json({ ok: true, file: path.basename(target) });
 });
 
@@ -386,6 +609,8 @@ async function close() {
   wss.close();
   await new Promise(resolve => netplay.io.close(resolve));
   if (server.listening) await new Promise(resolve => server.close(resolve));
+  try { if (lbDb) lbDb.close(); } catch (e) {}
+  lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
 return Object.assign(game, { app, server, wss, rooms, netplay, close, lanUrls });
