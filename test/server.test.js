@@ -36,7 +36,7 @@ const sharedLists = {
 const fakeDat = async which => which === 'fbneo' ? '<datafile><game name="mslug" sourcefile="x.cpp"><description>Metal Slug - Super Vehicle-001 (World)</description></game><game isbios="yes" name="neogeo"><description>Neo Geo</description></game></datafile>' : '<mame></mame>';
 // Another server on its own folders, for the tests that change what is on disk.
 async function instance(options) {
-  const g = createRemoteGame({ libretro: false, localRoms: path.join(temp, 'uploads'), launchBoxDir: path.join(temp, 'nothing-here'), ...options });
+  const g = createRemoteGame({ libretro: false, localRoms: path.join(temp, 'uploads'), launchBoxDir: path.join(temp, 'nothing-here'), customCoversDir: path.join(temp, 'propias'), ...options });
   g.server.listen(0, '127.0.0.1'); await once(g.server, 'listening');
   return { g, url: 'http://127.0.0.1:' + g.server.address().port };
 }
@@ -71,7 +71,7 @@ before(async () => {
   db.close();
   fs.writeFileSync(path.join(temp,'MAME','Roms','mslug.zip'), zip.toBuffer());
   game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'LaunchBox'),coverCacheDir:path.join(temp,'covers'),fetchCover:fakeCover,
-    libretroCacheDir:path.join(temp,'lr'),fetchLibretro:fakeLibretro(sharedLists),fetchDat:fakeDat,settingsFile:path.join(temp,'settings.json'),onQuit:()=>quits++,coversBesideGames:true });
+    libretroCacheDir:path.join(temp,'lr'),fetchLibretro:fakeLibretro(sharedLists),fetchDat:fakeDat,settingsFile:path.join(temp,'settings.json'),onQuit:()=>quits++,customCoversDir:path.join(temp,'propias') });
   game.server.listen(0,'127.0.0.1');await once(game.server,'listening');
   base='http://127.0.0.1:'+game.server.address().port;
   // The first listing starts the download of the thumbnail listings; wait for them so every test sees the same names.
@@ -313,7 +313,7 @@ test('One game by system and file: same JSON as the list, 404 when missing, 400 
   assert.equal((await fetch(base+'/api/game/snes/'+'a%3Ab')).status,400);
   assert.equal((await fetch(base+'/api/game/nope/x.nes')).status,400);
 });
-test('Covers: libretro first, LaunchBox as extra; saved beside the games, downloaded once',async()=>{
+test('Covers: libretro first, LaunchBox as extra; saved in the cache, downloaded once',async()=>{
   const get=async url=>(await fetch(base+url)).json();
   const nes=(await get('/api/games?system=nes&q=rock')).games[0];
   // Not in libretro: LaunchBox's image, by the id of its list.
@@ -339,19 +339,19 @@ test('Covers: libretro first, LaunchBox as extra; saved beside the games, downlo
   assert.deepEqual([meta.format,meta.width,meta.height],['webp',400,560]);
   assert.equal(downloads.at(-1),'dddd-2.jpg');assert.equal(downloads.length-beforeLb,1);
   assert.equal((await fetch(base+nes.cover)).status,200);assert.equal(downloads.length-beforeLb,1);
-  // Saved next to the ROMs, in <console>/covers/<rom name>.webp; the project cache stays empty.
-  assert.equal(fs.existsSync(path.join(temp,'NES','covers','test.webp')),true);
-  assert.equal(fs.existsSync(path.join(temp,'covers','dddd-2.webp')),false);
+  // Saved in the project cache (covers under temp), never in the games folder.
+  assert.equal(fs.existsSync(path.join(temp,'covers','dddd-2.webp')),true);
+  assert.equal(fs.existsSync(path.join(temp,'NES','covers')),false);
   const nc=await fetch(base+snes['No Cover (U).smc'].cover);
   assert.equal(nc.status,200);
   assert.equal(lrLog.at(-1),encodeURIComponent(SNES_LIB)+'/Named_Boxarts/No%20Cover%20(USA).png');assert.equal(lrLog.length-beforeLr,1);
   assert.equal((await sharp(Buffer.from(await nc.arrayBuffer())).metadata()).width,400);
-  assert.equal(fs.existsSync(path.join(temp,'Super Nintendo','Roms','covers','No Cover (U).webp')),true);
+  assert.equal(fs.existsSync(path.join(temp,'Super Nintendo','Roms','covers')),false);
   assert.equal(fs.readFileSync(path.join(temp,'Super Nintendo','Roms','No Cover (U).smc'),'utf8'),'smc');
-  assert.deepEqual(fs.readdirSync(path.join(temp,'Super Nintendo','Roms','covers')).filter(f=>!f.endsWith('.webp')),[]);
-  // Next listing: the saved image is promised (version = its date), the folder is not a game, nothing is downloaded again.
+  assert.equal(fs.readdirSync(path.join(temp,'covers')).some(f=>/^lr-.*\.webp$/.test(f)),true);
+  // Next listing: the cached image is promised again under its libretro name, nothing is downloaded again.
   const again=(await get('/api/games?system=snes')).games;
-  assert.match(again.find(g=>g.file==='No Cover (U).smc').cover,/\?v=l\d+-400$/);
+  assert.match(again.find(g=>g.file==='No Cover (U).smc').cover,/\?v=lr-[0-9a-f]{16}-400$/);
   assert.equal(again.some(g=>/covers/i.test(g.file)),false);
   assert.equal((await fetch(base+again.find(g=>g.file==='No Cover (U).smc').cover)).status,200);assert.equal(lrLog.length-beforeLr,1);
   // Rejected: unknown console, bad names, files not in the collection, games without a cover anywhere.
@@ -378,32 +378,35 @@ test('Covers: without LaunchBox nor libretro everything works, with no covers',a
     assert.equal((await fetch(url+'/api/cover/nes/test.nes')).status,404);
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });
-test('Covers: your own image beside the games wins; an unwritable folder falls back to the project cache',async()=>{
+test('Covers: your own image in RemoteGame\'s covers folder wins; the games folder is never read for them',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-covers-'));
+  const own=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-propias-'));
   try{
-    fs.mkdirSync(path.join(root,'NES','covers'),{recursive:true});
+    fs.mkdirSync(path.join(root,'NES'),{recursive:true});
     for(const f of ['a (U).nes','b (U).nes'])fs.writeFileSync(path.join(root,'NES',f),'NES\x1a');
-    const own=await sharp({create:{width:120,height:90,channels:3,background:'#0a0'}}).png().toBuffer();
-    fs.writeFileSync(path.join(root,'NES','covers','a (U).png'),own);
-    // SNES: "covers" is a file, so nothing can be written there.
-    fs.mkdirSync(path.join(root,'SNES'),{recursive:true});fs.writeFileSync(path.join(root,'SNES','covers'),'x');fs.writeFileSync(path.join(root,'SNES','c (U).smc'),'smc');
+    const mine=await sharp({create:{width:120,height:90,channels:3,background:'#0a0'}}).png().toBuffer();
+    fs.mkdirSync(path.join(own,'nes'));fs.writeFileSync(path.join(own,'nes','a (U).png'),mine);
+    // The old place, next to the games: not used any more, and left alone.
+    fs.mkdirSync(path.join(root,'NES','covers'));fs.writeFileSync(path.join(root,'NES','covers','b (U).png'),mine);
+    fs.mkdirSync(path.join(root,'SNES'),{recursive:true});fs.writeFileSync(path.join(root,'SNES','c (U).smc'),'smc');
     const lists={'Nintendo - Nintendo Entertainment System/Named_Boxarts':['a (USA)','b (USA)'],[SNES_LIB+'/Named_Boxarts']:['c (USA)']};
-    const {g,url}=await instance({ gamesRoot:root,libretro:true,coversBesideGames:true,coverCacheDir:path.join(root,'cache'),libretroCacheDir:path.join(root,'lr'),fetchLibretro:fakeLibretro(lists),fetchDat:fakeDat,settingsFile:path.join(root,'s.json') });
+    const {g,url}=await instance({ gamesRoot:root,libretro:true,customCoversDir:own,coverCacheDir:path.join(root,'cache'),libretroCacheDir:path.join(root,'lr'),fetchLibretro:fakeLibretro(lists),fetchDat:fakeDat,settingsFile:path.join(root,'s.json') });
     try{
       await fetch(url+'/api/games?system=all');await g.coversReady();
       const games=Object.fromEntries((await (await fetch(url+'/api/games?system=all')).json()).games.map(x=>[x.file,x]));
       assert.deepEqual(Object.keys(games).filter(f=>games[f].system!=='subidos').sort(),['a (U).nes','b (U).nes','c (U).smc']);
       assert.match(games['a (U).nes'].cover,/\?v=l\d+-400$/);
       const before=lrLog.length;
-      const mine=await fetch(url+games['a (U).nes'].cover);
-      assert.equal(mine.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await mine.arrayBuffer()),own);assert.equal(lrLog.length,before);
-      assert.equal((await fetch(url+games['b (U).nes'].cover)).status,200);
-      assert.equal(fs.existsSync(path.join(root,'NES','covers','b (U).webp')),true);
+      const picked=await fetch(url+games['a (U).nes'].cover);
+      assert.equal(picked.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await picked.arrayBuffer()),mine);assert.equal(lrLog.length,before);
+      // b ignores the copy in the games folder: it gets the downloaded image, and that folder is left as it was.
+      const b=await fetch(url+games['b (U).nes'].cover);
+      assert.equal(b.status,200);assert.match(b.headers.get('content-type'),/^image\/webp/);
+      assert.deepEqual(fs.readdirSync(path.join(root,'NES','covers')),['b (U).png']);
       assert.equal((await fetch(url+games['c (U).smc'].cover)).status,200);
-      assert.equal(fs.readdirSync(path.join(root,'cache')).filter(f=>/^lr-.*\.webp$/.test(f)).length,1);
-      assert.equal(fs.readFileSync(path.join(root,'SNES','covers'),'utf8'),'x');
+      assert.equal(fs.readdirSync(path.join(root,'cache')).filter(f=>/^lr-.*\.webp$/.test(f)).length,2);
     }finally{await g.close();}
-  }finally{fs.rmSync(root,{recursive:true,force:true});}
+  }finally{fs.rmSync(root,{recursive:true,force:true});fs.rmSync(own,{recursive:true,force:true});}
 });
 test('Covers: by default nothing is written in the games folder; they go to the project cache',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-nowrite-'));
@@ -419,6 +422,24 @@ test('Covers: by default nothing is written in the games folder; they go to the 
       assert.equal((await fetch(url+a.cover)).status,200);
     }finally{await g.close();}
   }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Covers: serving and caching them creates nothing inside the games folder',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-readonly-'));
+  const outside=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-outside-'));
+  try{
+    fs.mkdirSync(path.join(root,'NES'));fs.writeFileSync(path.join(root,'NES','mario (U).nes'),'NES\x1a');
+    fs.mkdirSync(path.join(root,'Super Nintendo','Roms'),{recursive:true});fs.writeFileSync(path.join(root,'Super Nintendo','Roms','zelda (U).smc'),'smc');
+    const before=fs.readdirSync(root,{recursive:true}).sort();
+    const {g,url}=await instance({ gamesRoot:root,libretro:true,customCoversDir:path.join(outside,'propias'),coverCacheDir:path.join(outside,'cache'),libretroCacheDir:path.join(outside,'lr'),fetchLibretro:fakeLibretro({'Nintendo - Nintendo Entertainment System/Named_Boxarts':['mario (USA)']}),fetchDat:fakeDat,settingsFile:path.join(outside,'s.json') });
+    try{
+      await fetch(url+'/api/games?system=all');await g.coversReady();
+      const withCover=(await (await fetch(url+'/api/games?system=all')).json()).games.filter(x=>x.cover);
+      assert.deepEqual(withCover.map(x=>x.file),['mario (U).nes']);
+      for(const x of withCover)assert.equal((await fetch(url+x.cover)).status,200);
+      assert.equal(fs.readdirSync(path.join(outside,'cache')).filter(f=>/^lr-.*\.webp$/.test(f)).length,1);
+      assert.deepEqual(fs.readdirSync(root,{recursive:true}).sort(),before);
+    }finally{await g.close();}
+  }finally{fs.rmSync(root,{recursive:true,force:true});fs.rmSync(outside,{recursive:true,force:true});}
 });
 test('Settings: finds each console by folder name, saves the choice, and only this PC with the header may touch it',async()=>{
   delete process.env.GAMES_ROOT;
@@ -540,4 +561,92 @@ test('Search: Spanish spelling finds the English title; no result says so',async
   // No stray hits: -cion only appears for a real "-tion" word.
   for(const q of ['internacionales','mundial'])assert.equal((await get('/api/games?system=all&q='+q)).total,0,q);
   assert.equal((await get('/api/games?system=snes&q=zzzz')).total,0);
+});
+// The tunnel runs ngrok: these tests inject a fake process that writes ngrok's JSON lines, so the real ngrok never starts.
+const { PassThrough } = require('node:stream');
+const { EventEmitter } = require('node:events');
+const fakeNgrok = () => { const c = new EventEmitter(); c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => { c.killed = true; setImmediate(() => c.emit('exit', null)); return true; }; return c; };
+const ngrokLine = entry => JSON.stringify(entry) + '\n';
+const waitFor = async cond => { for (let i = 0; i < 300 && !cond(); i++) await new Promise(r => setTimeout(r, 10)); assert.ok(cond(), 'no llegó a tiempo'); };
+test('Tunnel: starting, then on with the https link; one ngrok at a time; stop turns it off and drops the link',async()=>{
+  const spawned=[];const spawnTunnel=(cmd,args)=>{const c=fakeNgrok();c.cmd=cmd;c.args=args;spawned.push(c);return c;};
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-tunnel-'));
+  const {g,url}=await instance({ spawnTunnel,settingsFile:path.join(root,'settings.json') });
+  try{
+    assert.deepEqual(g.tunnel.state(),{state:'off',url:null,error:null});
+    assert.equal(g.tunnel.wanted(),true);   // no settings.json yet: the tunnel starts on
+    assert.equal(g.tunnel.start().state,'starting');
+    assert.equal(g.tunnel.start().state,'starting');   // a second start does not spawn another ngrok
+    assert.equal(spawned.length,1);
+    assert.equal(spawned[0].cmd,'ngrok');
+    assert.deepEqual(spawned[0].args,['http',String(g.server.address().port),'--log','stdout','--log-format','json']);
+    spawned[0].stdout.write(ngrokLine({lvl:'info',msg:'started tunnel',url:'https://demo.ngrok-free.app'}));
+    await waitFor(()=>g.tunnel.state().state==='on');
+    assert.deepEqual(g.tunnel.state(),{state:'on',url:'https://demo.ngrok-free.app',error:null});
+    const party=await (await fetch(url+'/api/party')).json();
+    assert.equal(party.publicUrl,'https://demo.ngrok-free.app');assert.equal(party.tunnel.state,'on');
+    assert.deepEqual(g.tunnel.stop(),{state:'off',url:null,error:null});
+    assert.equal(spawned[0].killed,true);
+    assert.equal((await (await fetch(url+'/api/party')).json()).publicUrl,null);
+    assert.equal(g.tunnel.stop().state,'off');   // stopping twice is harmless
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Tunnel: a dead ngrok leaves an error and no link; a missing authtoken or ngrok is explained',async()=>{
+  const spawned=[];let mode='ok';
+  const spawnTunnel=()=>{const c=fakeNgrok();spawned.push(c);if(mode==='missing')setImmediate(()=>c.emit('error',Object.assign(new Error('spawn ngrok ENOENT'),{code:'ENOENT'})));return c;};
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-tunnel-'));
+  const {g,url}=await instance({ spawnTunnel,settingsFile:path.join(root,'settings.json') });
+  try{
+    g.tunnel.start();
+    spawned[0].stdout.write(ngrokLine({lvl:'info',url:'https://demo.ngrok-free.app'}));
+    await waitFor(()=>g.tunnel.state().state==='on');
+    spawned[0].emit('exit',1);
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'ngrok se cerró (código 1)'});
+    assert.equal((await (await fetch(url+'/api/party')).json()).publicUrl,null);
+    // Without an authtoken ngrok logs it, then exits.
+    g.tunnel.start();
+    spawned[1].stdout.write(ngrokLine({lvl:'crit',msg:'command failed',err:'authentication failed: Usage of ngrok requires a verified account and authtoken.'}));
+    await waitFor(()=>g.tunnel.state().error);
+    spawned[1].emit('exit',1);
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'Falta configurar el authtoken de ngrok'});
+    // Without ngrok on the PATH the spawn itself fails with ENOENT.
+    mode='missing';
+    g.tunnel.start();
+    await waitFor(()=>g.tunnel.state().state==='error');
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'ngrok no está instalado (winget install ngrok.ngrok)'});
+    assert.deepEqual(g.tunnel.stop(),{state:'off',url:null,error:null});
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Tunnel switch: only this PC with its header; the choice is saved in settings.json beside the other keys',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-switch-'));
+  const settingsFile=path.join(root,'settings.json');
+  fs.writeFileSync(settingsFile,JSON.stringify({gamesRoot:root}));
+  const spawned=[];
+  const {g,url}=await instance({ spawnTunnel:()=>{const c=fakeNgrok();spawned.push(c);return c;},settingsFile });
+  const saved=()=>JSON.parse(fs.readFileSync(settingsFile,'utf8'));
+  const call=(method,body,headers={'X-RemoteGame':'tunnel'})=>fetch(url+'/api/tunnel',{method,headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
+  try{
+    // No header, another header, or a request that came through the tunnel: 403, nothing starts, nothing is saved.
+    for(const [method,body,headers] of [['GET',undefined,{}],['POST',{on:true},{}],['POST',{on:true},{'X-RemoteGame':'settings'}],['POST',{on:true},{'X-RemoteGame':'tunnel','X-Forwarded-For':'203.0.113.9'}],['GET',undefined,{'X-RemoteGame':'tunnel','X-Forwarded-For':'203.0.113.9'}]])
+      assert.equal((await call(method,body,headers)).status,403,method+' '+JSON.stringify(headers));
+    assert.equal(spawned.length,0);assert.deepEqual(saved(),{gamesRoot:root});
+    // This PC: the owner's GET answers; POST on starts ngrok and saves share: true.
+    assert.equal((await (await call('GET')).json()).tunnel.state,'off');
+    let r=await call('POST',{on:true});assert.equal(r.status,200);
+    assert.equal((await r.json()).tunnel.state,'starting');
+    assert.equal(spawned.length,1);
+    spawned[0].stdout.write(ngrokLine({lvl:'info',url:'https://demo.ngrok-free.app'}));
+    await waitFor(()=>g.tunnel.state().state==='on');
+    assert.equal((await (await call('GET')).json()).tunnel.url,'https://demo.ngrok-free.app');
+    assert.equal((await (await fetch(url+'/api/party')).json()).tunnel.state,'on');
+    assert.deepEqual(saved(),{gamesRoot:root,share:true});
+    // POST off stops ngrok and saves share: false, so the next start keeps it off.
+    r=await call('POST',{on:false});assert.deepEqual(await r.json(),{ok:true,tunnel:{state:'off',url:null,error:null}});
+    assert.equal(spawned[0].killed,true);
+    assert.deepEqual(saved(),{gamesRoot:root,share:false});
+    assert.equal(g.tunnel.wanted(),false);
+    // Anything but true or false is refused and changes nothing.
+    for(const bad of [{},{on:'yes'},{on:1}])assert.equal((await call('POST',bad)).status,400);
+    assert.deepEqual(saved(),{gamesRoot:root,share:false});
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });

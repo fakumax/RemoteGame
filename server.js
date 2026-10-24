@@ -1,6 +1,6 @@
 // RemoteGame: biblioteca local y netplay NES 2P
-// En la carpeta de juegos las ROMs nunca se tocan: lo unico que se escribe ahi son las portadas,
-// en <consola>/covers/. Fuera de ella se escribe ./roms (subidas desde la web), ./cache y settings.json.
+// La carpeta de juegos solo se lee: aca nunca se escribe nada. Se escriben ./roms (subidas desde la web),
+// ./cache (portadas y listados descargados), ./covers (portadas propias, por consola) y settings.json.
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -367,7 +367,7 @@ function gameJson(it) {
   const sys = SYSTEMS[it.system];
   // Arcade: the core that can run the ZIP (FBNeo, else MAME 2003); when none can, the player still tries FBNeo.
   const core = it.system === 'nes' || (it.system === 'subidos' && /\.nes$/i.test(it.file)) ? '&core=nes' : it.compat && it.compat.core ? '&core=' + it.compat.core : '';
-  // The saved image (or the user's own) beside the games, else the first source that knows this game.
+  // The user's own image (./covers), else the first source that knows this game.
   const local = localCover(it.system, it.file), cover = local ? { id: 'l' + local.v } : coverList(it.system, it.file)[0];
   const out = {
     file: it.file, name: it.name, year: it.year, size: it.size, system: it.system, systemLabel: sys.label,
@@ -399,12 +399,10 @@ function listGames(sysId, q, limit, offset, not) {
 
 // Covers: libretro-thumbnails (free, matched by exact title) is the main source; if LaunchBox is
 // installed, its metadata (read only SQLite) is one more. An image is downloaded once, shrunk, and
-// kept in ./cache/covers. Optionally (coversBesideGames in settings.json, or COVERS_IN_GAMES=1) they are saved
-// as <console folder>/covers/<rom name>.webp so they travel with the collection; if that folder cannot be
-// written, ./cache/covers is used instead. Either way a picture found in <console folder>/covers with the ROM's
-// name (.png, .jpg, .webp) wins. The ROMs themselves are never touched.
-const COVERS_BESIDE = options.coversBesideGames ?? (process.env.COVERS_IN_GAMES === '1' || readSettings().coversBesideGames === true);
+// kept in ./cache/covers. Your own picture wins over those: ./covers/<system>/<rom name>.(png|jpg|jpeg|webp),
+// in this project's folder. The games folder is only read, nothing is ever written there.
 const COVER_CACHE = path.resolve(options.coverCacheDir || path.join(__dirname, 'cache', 'covers'));
+const CUSTOM_COVERS = path.resolve(options.customCoversDir || path.join(__dirname, 'covers'));
 const COVER_MAX = 24 * 1024 * 1024;
 // Covers are stored small: WebP, 400 px wide at most (a card is ~190 px, sharp on 2x screens).
 const COVER_WIDTH = 400;
@@ -415,12 +413,12 @@ function coverSharp() {
 }
 // Without sharp the original image is kept as is.
 const coverFile = name => coverSharp() ? name.replace(/\.\w+$/, '.webp') : name;
-// Images beside the games, per console, found by the ROM's name without extension. The user's own
-// .png/.jpg beat our .webp. The folder is read again every 10 s (and after each save).
+// Own images per console (./covers/<console>/), found by the ROM's name without extension. The user's own
+// .png/.jpg beat our .webp. The folder is read again every 10 s.
 const COVER_EXTS = ['.png', '.jpg', '.jpeg', '.webp'];
 const localCovers = new Map();
 function localCover(sysId, file) {
-  const dir = path.join(SYSTEMS[sysId].dir, 'covers');
+  const dir = path.join(CUSTOM_COVERS, sysId);
   let hit = localCovers.get(sysId);
   if (!hit || hit.dir !== dir || Date.now() - hit.at > 10000) {
     const files = new Map();
@@ -429,7 +427,7 @@ function localCover(sysId, file) {
         const ext = path.extname(name).toLowerCase(), rank = COVER_EXTS.indexOf(ext), stem = name.slice(0, -ext.length).toLowerCase();
         if (rank >= 0 && (!files.has(stem) || rank < files.get(stem).rank)) files.set(stem, { name, rank });
       }
-    } catch (e) { /* sin carpeta covers */ }
+    } catch (e) { /* sin carpeta todavia */ }
     hit = { at: Date.now(), dir, files };
     localCovers.set(sysId, hit);
   }
@@ -659,14 +657,14 @@ const coverJobs = new Map(), coverFails = new Map();
 let coverBusy = 0;
 const coverQueue = [];
 // A few downloads at a time (LaunchBox and libretro share the limit); the same ROM asked twice shares one download.
-// Resolves to the image to serve: the one saved beside the games, or in ./cache/covers.
+// Resolves to the image to serve: the one in ./cache/covers.
 function ensureCover(sysId, file, cover) {
   const fallback = path.join(COVER_CACHE, coverFile(cover.file));
   if (fs.existsSync(fallback)) return Promise.resolve(fallback);
   const key = sysId + '/' + file;
   if (coverFails.get(cover.id) > Date.now()) return Promise.reject(new Error('reintento pendiente'));
   if (coverJobs.has(key)) return coverJobs.get(key);
-  const job = new Promise((resolve, reject) => coverQueue.push({ sysId, file, cover, fallback, resolve, reject }));
+  const job = new Promise((resolve, reject) => coverQueue.push({ cover, fallback, resolve, reject }));
   coverJobs.set(key, job);
   job.catch(() => {}).finally(() => coverJobs.delete(key));
   pumpCovers();
@@ -683,18 +681,14 @@ function saveCover(full, data) {
 }
 function pumpCovers() {
   while (coverBusy < 4 && coverQueue.length) {
-    const { sysId, file, cover, fallback, resolve, reject } = coverQueue.shift();
+    const { cover, fallback, resolve, reject } = coverQueue.shift();
     coverBusy++;
     (async () => {
       try {
         let data = cover.lr ? await fetchLibretro(cover.lr) : await fetchCover(cover.file);
-        let ext = path.extname(cover.file);
-        if (coverSharp()) { data = await coverSharp()(data).resize({ width: COVER_WIDTH, withoutEnlargement: true, fit: 'inside' }).webp({ quality: 80 }).toBuffer(); ext = '.webp'; }
-        const beside = path.join(SYSTEMS[sysId].dir, 'covers', file.replace(/\.[^.]+$/, '') + ext);
-        let saved = fallback;
-        if (COVERS_BESIDE) { try { saveCover(beside, data); localCovers.delete(sysId); saved = beside; } catch (e) { /* folder not writable */ } }
-        if (saved === fallback) saveCover(fallback, data);
-        resolve(saved);
+        if (coverSharp()) data = await coverSharp()(data).resize({ width: COVER_WIDTH, withoutEnlargement: true, fit: 'inside' }).webp({ quality: 80 }).toBuffer();
+        saveCover(fallback, data);
+        resolve(fallback);
       } catch (e) {
         coverFails.set(cover.id, Date.now() + 60000);
         reject(e);
@@ -1105,9 +1099,78 @@ function leaveParty(ws) {
 }
 app.get('/api/party', (req, res) => {
   const slots = guestSlots();
-  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: slots.length > 0, guests: slots.length, slots, players: slots.map(s => s + 2), hosting: !!party.host, game: party.host ? party.game : null });
+  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: slots.length > 0, guests: slots.length, slots, players: slots.map(s => s + 2), hosting: !!party.host, game: party.host ? party.game : null, tunnel: tunnel.state() });
 });
+// The switch of the banner. Only this PC: a guest's page gets 403. The choice is kept in settings.json
+// (share) and read at startup, so it survives restarts.
+app.get('/api/tunnel', ownerOnly('tunnel'), (req, res) => res.json({ ok: true, tunnel: tunnel.state() }));
+app.post('/api/tunnel', ownerOnly('tunnel'), (req, res) => {
+  const on = req.body && req.body.on;
+  if (typeof on !== 'boolean') return res.status(400).json({ ok: false, msg: 'Falta on (true o false).' });
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ ...readSettings(), share: on }, null, 2)); }
+  catch (e) { return res.status(500).json({ ok: false, msg: 'No pude guardar los ajustes.' }); }
+  res.json({ ok: true, tunnel: on ? tunnel.start() : tunnel.stop() });
+});
+// The ngrok tunnel: guests outside the home network reach this server through it. Only pages and
+// signaling go through it; video and controls travel over WebRTC. One ngrok at a time (free plan: one session).
+const tun = { state: 'off', error: null, proc: null };
+const spawnTunnel = options.spawnTunnel || require('child_process').spawn;
+let hooked = false;
+const tunnel = {
+  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error }),
+  // Only a saved "off" keeps it down: a new install starts with the tunnel on.
+  wanted: () => readSettings().share !== false,
+  start() {
+    if (tun.proc) return tunnel.state();
+    const child = spawnTunnel('ngrok', ['http', String(server.address()?.port || PORT), '--log', 'stdout', '--log-format', 'json'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    Object.assign(tun, { state: 'starting', error: null, proc: child });
+    game.publicUrl = null;
+    // Errors count only while starting: a tunnel that is up keeps running through ngrok's own reconnects.
+    const note = text => {
+      console.log('ngrok: ' + text);
+      if (tun.state === 'starting') tun.error = /authtoken|authentication failed|ERR_NGROK_4018/i.test(text) ? 'Falta configurar el authtoken de ngrok' : text.split('\n')[0].slice(0, 200);
+    };
+    const onLine = line => {
+      let entry; try { entry = JSON.parse(line); } catch { return; }
+      if (child !== tun.proc) return;
+      if (entry.url && /^https:/.test(entry.url) && tun.state === 'starting') {
+        tun.state = 'on';
+        game.publicUrl = entry.url;
+        console.log('\n  Link para tu amigo:  ' + entry.url + '\n  (es siempre el mismo; pasáselo una sola vez)\n');
+      } else if (entry.lvl === 'eror' || (entry.err && entry.err !== '<nil>')) note(String(entry.err && entry.err !== '<nil>' ? entry.err : entry.msg));
+    };
+    let buffer = '';
+    child.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split('\n'); buffer = lines.pop(); lines.forEach(onLine); });
+    child.stderr.on('data', chunk => { if (child === tun.proc) note(String(chunk).trim()); });
+    // ENOENT: ngrok is not on the PATH. Clearing tun.proc turns the exit that may follow into a no-op.
+    child.on('error', err => {
+      if (child !== tun.proc) return;
+      Object.assign(tun, { state: 'error', error: err.code === 'ENOENT' ? 'ngrok no está instalado (winget install ngrok.ngrok)' : err.message, proc: null });
+      game.publicUrl = null;
+    });
+    child.on('exit', code => {
+      if (child !== tun.proc) return;   // stopped on purpose, or already reported
+      Object.assign(tun, { state: 'error', error: tun.error || 'ngrok se cerró (código ' + code + ')', proc: null });
+      game.publicUrl = null;
+    });
+    if (!hooked) {
+      hooked = true;
+      // Ctrl+C, closing the console (SIGHUP) or quitting must not leave ngrok running.
+      process.on('exit', () => tunnel.stop());
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { tunnel.stop(); process.exit(0); });
+    }
+    return tunnel.state();
+  },
+  stop() {
+    const child = tun.proc;
+    Object.assign(tun, { state: 'off', error: null, proc: null });
+    game.publicUrl = null;
+    if (child) try { child.kill(); } catch {}
+    return tunnel.state();
+  }
+};
 async function close() {
+  tunnel.stop();
   for (const ws of wss.clients) ws.terminate();
   wss.close();
   await new Promise(resolve => netplay.io.close(resolve));
@@ -1118,28 +1181,7 @@ async function close() {
   lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
-return Object.assign(game, { app, server, wss, rooms, party, netplay, close, lanUrls,coversReady: () => Promise.all([...lrBusy.values()]) });
-}
-// Opens an ngrok tunnel (unless --no-share) so guests outside the home network can join.
-// Only pages and signaling go through it; video and controls travel over WebRTC.
-function startTunnel(game, port) {
-  const { spawn } = require('child_process');
-  const ngrok = spawn('ngrok', ['http', String(port), '--log', 'stdout', '--log-format', 'json'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-  ngrok.on('error', () => console.log('No se encontró ngrok. Instalalo (winget install ngrok.ngrok) y configurá tu authtoken.'));
-  const onLine = line => {
-    let entry; try { entry = JSON.parse(line); } catch { return; }
-    if (entry.url && /^https:/.test(entry.url) && !game.publicUrl) {
-      game.publicUrl = entry.url;
-      console.log('\n  Link para tu amigo:  ' + entry.url + '\n  (es siempre el mismo; pasáselo una sola vez)\n');
-    } else if (entry.lvl === 'eror' || (entry.err && entry.err !== '<nil>')) console.log('ngrok: ' + (entry.err || entry.msg));
-  };
-  let buffer = '';
-  ngrok.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split('\n'); buffer = lines.pop(); lines.forEach(onLine); });
-  ngrok.stderr.on('data', chunk => console.log('ngrok: ' + String(chunk).trim()));
-  const stop = () => { try { ngrok.kill(); } catch {} };
-  process.on('exit', stop);
-  // SIGHUP: the console window was closed with its X button.
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { stop(); process.exit(0); });
+return Object.assign(game, { app, server, wss, rooms, party, netplay, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]) });
 }
 function openBrowser(url) {
   require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
@@ -1187,8 +1229,9 @@ if (require.main === module) {
   game.server.once('listening', () => {
     console.log('RemoteGame v0.5.0 en http://localhost:' + port);
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
+    // --no-share and SHARE=0 start it off for this run only; otherwise the saved switch (settings.json) decides.
     // After a replacement, give ngrok a moment to notice the old tunnel is gone (the free plan allows one).
-    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0') setTimeout(() => startTunnel(game, port), replaced ? 2500 : 0);
+    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0' && game.tunnel.wanted()) setTimeout(() => game.tunnel.start(), replaced ? 2500 : 0);
     if (open) openBrowser('http://localhost:' + port);
     if (open) console.log('Cerrá esta ventana para apagar RemoteGame.');
   });

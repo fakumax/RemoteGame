@@ -10,4 +10,5 @@ test-results/
 config.local.json
 .claude/
 cache/
+covers/
 settings.json
