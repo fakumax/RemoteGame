@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { once } = require('node:events');
 const zlib = require('node:zlib');
-const { createVpad, spawnKeyHelper } = require('../vpad');
+const { createVpad, spawnKeyHelper, KEY_MAP } = require('../vpad');
 const { createRemoteGame } = require('../server');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -252,9 +252,9 @@ test('keys: RetroPad buttons and sticks become each player\'s MAME keys, sent on
     assert.deepEqual(h.take().sort(), ['d 3 0', 'd 7 0', 'd 19 0', 'd 30 0', 'd 31 0'].sort());
     v.update(0, { ...NEUTRAL, b: bit(0, 8, 4, 3, 2) });
     assert.deepEqual(h.take(), [], 'same state sends nothing');
-    // Drop A and Select, add Y (3 = Q 16), X (4 = W 17), L (5 = E 18); R has no default key on P2
+    // Drop A and Select, add Y (3 = Q 16), X (4 = W 17), L (5 = E 18); R is button 6 = keypad 1 (79)
     v.update(0, { ...NEUTRAL, b: bit(0, 1, 9, 10, 11, 4, 3) });
-    assert.deepEqual(h.take().sort(), ['d 16 0', 'd 17 0', 'd 18 0', 'u 31 0', 'u 7 0'].sort());
+    assert.deepEqual(h.take().sort(), ['d 16 0', 'd 17 0', 'd 18 0', 'd 79 0', 'u 31 0', 'u 7 0'].sort());
     // Left stick past +-64 is the direction; D-pad up is still held, so it only adds
     v.update(0, { ...NEUTRAL, b: bit(0, 1, 9, 10, 11, 4, 3), x: -70, y: 63 });
     assert.deepEqual(h.take(), ['d 32 0'], 'left = D (32); y 63 is below the threshold');
@@ -266,9 +266,38 @@ test('keys: RetroPad buttons and sticks become each player\'s MAME keys, sent on
     // P4 (seat 2): keypad 8 2 4 6, keypad 0 . Enter (extended), 4, coin 8
     v.update(2, { ...NEUTRAL, b: bit(0, 8, 1, 4, 5, 6, 7, 3, 2) });
     assert.deepEqual(h.take().sort(), ['d 82 0', 'd 83 0', 'd 28 1', 'd 72 0', 'd 80 0', 'd 75 0', 'd 77 0', 'd 5 0', 'd 9 0'].sort());
-    // Buttons with no default key (L2, R2, L3, R3, and L/R on P3) press nothing
+    // L2, R2, L3, R3 press nothing; L and R on P3 are buttons 5 and 6 = ; and \
     v.update(1, { ...NEUTRAL, b: bit(12, 13, 14, 15, 10, 11) });
-    assert.deepEqual(h.take().sort(), ['u 29 1', 'u 54 0', 'u 28 0', 'u 36 0', 'u 38 0', 'u 4 0', 'u 8 0'].sort());
+    assert.deepEqual(h.take().sort(), ['u 29 1', 'u 54 0', 'u 28 0', 'u 36 0', 'u 38 0', 'u 4 0', 'u 8 0', 'd 39 0', 'd 43 0'].sort());
+  } finally { await v.close(); }
+});
+
+test('keys: each player has the 4 directions, buttons 1-6, start and coin', () => {
+  const actions = ['up', 'down', 'left', 'right', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'start', 'coin'];
+  KEY_MAP.forEach((map, i) => {
+    for (const a of actions) assert.match(map[a] || '', /^\d+,[01]$/, 'P' + (i + 2) + ' ' + a);
+  });
+});
+
+test('keys: no key is shared by two players, and none is a default of MAME for P1', () => {
+  // The same "scancode,extended" format as KEY_MAP, written out here on purpose: arrows, Left Ctrl, Left Alt, Space, Left Shift, Z, X, 1, 5.
+  const k = (sc, ext = 0) => sc + ',' + ext;
+  const p1 = [k(0x48, 1), k(0x50, 1), k(0x4b, 1), k(0x4d, 1), k(0x1d), k(0x38), k(0x39), k(0x2a), k(0x2c), k(0x2d), k(0x02), k(0x06)];
+  const all = KEY_MAP.flatMap(map => Object.values(map));
+  assert.equal(new Set(all).size, all.length, 'a key is repeated');
+  for (const key of all) assert.ok(!p1.includes(key), key + ' is a P1 default');
+});
+
+test('keys: the buttons MAME leaves unbound press their keys (P2 6, P3 4-6, P4 4-6)', async () => {
+  const h = fakeHelper();
+  const v = createVpad({ dsuPort: 0, keyHelper: h.make });
+  try {
+    v.update(0, { ...NEUTRAL, b: bit(11) });
+    assert.deepEqual(h.take(), ['d 79 0']);
+    v.update(1, { ...NEUTRAL, b: bit(9) });
+    assert.deepEqual(h.take(), ['d 22 0']);
+    v.update(2, { ...NEUTRAL, b: bit(9, 10, 11) });
+    assert.deepEqual(h.take().sort(), ['d 71 0', 'd 73 0', 'd 76 0'].sort());
   } finally { await v.close(); }
 });
 

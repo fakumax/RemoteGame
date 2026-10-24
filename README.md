@@ -106,16 +106,18 @@ MAME no tiene mandos "virtuales": RemoteGame le *teclea* las teclas de cada juga
 
 1. Agregá `-keyboardprovider win32` al lanzador, o escribí `keyboardprovider win32` en `mame.ini`. Hace falta porque por defecto MAME lee el teclado con `rawinput` y este descarta las teclas inyectadas por programa; con `win32` las ve ([documentación](https://docs.mamedev.org/commandline/commandline-all.html): "user-mode keyboard emulation tools [...] will almost certainly require the use of `-keyboardprovider win32`").
 2. Dejá la **ventana de MAME al frente**. RemoteGame solo teclea mientras la ventana en primer plano sea `mame.exe`; si cambiás de programa suelta todo y no escribe nada en el otro. Al volver a MAME, las teclas que sus amigos sigan apretando se retoman.
-3. Dejá **Bloq Num** activado: P4 usa el teclado numérico.
-4. Teclas de cada jugador (las de fábrica de MAME, [docs.mamedev.org/usingmame/defaultkeys.html](https://docs.mamedev.org/usingmame/defaultkeys.html), teclado ANSI de EE. UU.):
+3. Dejá **Bloq Num** activado: P4 usa el teclado numérico, y el botón 6 de P2 también.
+4. Teclas de cada jugador. Las de fábrica de MAME vienen de [docs.mamedev.org/usingmame/defaultkeys.html](https://docs.mamedev.org/usingmame/defaultkeys.html) (teclado ANSI de EE. UU.). Las **en negrita** no tienen tecla en MAME:
 
 | | Dirección (arriba, abajo, izq., der.) | Botones 1 a 6 | Start | Moneda |
 | --- | --- | --- | --- | --- |
-| P2 | `R` `F` `D` `G` | `A` `S` `Q` `W` `E` (el 6 no tiene tecla) | `2` | `6` |
-| P3 | `I` `K` `J` `L` | `Ctrl` der., `Shift` der., `Enter` (4 a 6 sin tecla) | `3` | `7` |
-| P4 | teclado numérico `8` `2` `4` `6` | `0`, `.`, `Enter` numérico (4 a 6 sin tecla) | `4` | `8` |
+| P2 | `R` `F` `D` `G` | `A` `S` `Q` `W` `E`, y el 6: **teclado numérico `1`** | `2` | `6` |
+| P3 | `I` `K` `J` `L` | `Ctrl` der., `Shift` der., `Enter`, y el 4 a 6: **`U` `;` `\`** | `3` | `7` |
+| P4 | teclado numérico `8` `2` `4` `6` | `0`, `.`, `Enter` numérico, y el 4 a 6: **teclado numérico `7` `9` `5`** | `4` | `8` |
 
-La cruceta y el stick izquierdo (pasado el 50 %) son las direcciones. Los botones salen en orden arcade: B = 1, A = 2, Y = 3, X = 4, L = 5, R = 6; Select = moneda y Start = Start (las teclas `5` a `8` son las monedas 1 a 4, así que P2 usa la `6`, P3 la `7` y P4 la `8`). MAME solo trae tres botones de fábrica para P3 y P4; si tu juego usa más, asignalos en MAME (Tab → Configurar controles). Si dos jugadores comparten tecla en un juego de pantalla compartida (los P1 de doble stick usan `E S D F` e `I J K L`), cambiá las teclas en MAME.
+Esas teclas en negrita hay que asignarlas **una sola vez** en MAME: Tab → **Input Settings** → **Input Assignments (general)** → **Player 2 Controls** (o Player 3 / Player 4) → el botón → apretar la tecla. Son para todos los sistemas, no por juego. `;` y `\` van por posición: en un teclado en español esas teclas llevan otros signos (la Ñ, por ejemplo), pero es la misma tecla. RemoteGame no toca los archivos de MAME: esa configuración la hacés vos desde MAME.
+
+La cruceta y el stick izquierdo (pasado el 50 %) son las direcciones. Los botones salen en orden arcade: B = 1, A = 2, Y = 3, X = 4, L = 5, R = 6; Select = moneda y Start = Start (las teclas `5` a `8` son las monedas 1 a 4, así que P2 usa la `6`, P3 la `7` y P4 la `8`). Si dos jugadores comparten tecla en un juego de pantalla compartida (los P1 de doble stick usan `E S D F` e `I J K L`), cambiá las teclas en MAME.
 
 El programa se puede cambiar o ampliar con `keyTargets` en `config.json` (por ejemplo `["mame.exe", "flycast.exe", "retroarch.exe"]`). **Flycast y RetroArch:** probalos así, con el teclado, agregando su proceso a la lista y poniendo en cada uno las mismas teclas de arriba para los jugadores 2 a 4; todavía no están probados. Si no andan, quedan para más adelante.
 

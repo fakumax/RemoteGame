@@ -168,16 +168,17 @@ function startDsu(options, state) {
 }
 
 // ---- Keyboard (MAME and other emulators that read the keyboard)
-// Scancodes (set 1) and the extended flag, "scancode,extended". Defaults of MAME's input.
+// Scancodes (set 1) and the extended flag, "scancode,extended". MAME's defaults, plus keys for the buttons MAME leaves unbound.
 // Source: https://docs.mamedev.org/usingmame/defaultkeys.html (US layout; P2 has buttons 1-5 only, P3 and P4 have 1-3).
+// The unbound ones (P2 button 6, P3 and P4 buttons 4-6) are set once in MAME's own menu (see README).
 const K = (sc, ext = 0) => sc + ',' + ext;
 const KEY_MAP = [
-  // P2: R F D G, A S Q W E, 2, coin 6
-  { up: K(0x13), down: K(0x21), left: K(0x20), right: K(0x22), b1: K(0x1e), b2: K(0x1f), b3: K(0x10), b4: K(0x11), b5: K(0x12), start: K(0x03), coin: K(0x07) },
-  // P3: I K J L, Right Ctrl, Right Shift, Enter, 3, coin 7
-  { up: K(0x17), down: K(0x25), left: K(0x24), right: K(0x26), b1: K(0x1d, 1), b2: K(0x36), b3: K(0x1c), start: K(0x04), coin: K(0x08) },
-  // P4: keypad 8 2 4 6, keypad 0 . Enter, 4, coin 8 (needs NumLock on)
-  { up: K(0x48), down: K(0x50), left: K(0x4b), right: K(0x4d), b1: K(0x52), b2: K(0x53), b3: K(0x1c, 1), start: K(0x05), coin: K(0x09) }
+  // P2: R F D G, A S Q W E, 2, coin 6; button 6 = keypad 1
+  { up: K(0x13), down: K(0x21), left: K(0x20), right: K(0x22), b1: K(0x1e), b2: K(0x1f), b3: K(0x10), b4: K(0x11), b5: K(0x12), b6: K(0x4f), start: K(0x03), coin: K(0x07) },
+  // P3: I K J L, Right Ctrl, Right Shift, Enter, 3, coin 7; buttons 4-6 = U ; \
+  { up: K(0x17), down: K(0x25), left: K(0x24), right: K(0x26), b1: K(0x1d, 1), b2: K(0x36), b3: K(0x1c), b4: K(0x16), b5: K(0x27), b6: K(0x2b), start: K(0x04), coin: K(0x08) },
+  // P4: keypad 8 2 4 6, keypad 0 . Enter, 4, coin 8 (needs NumLock on); buttons 4-6 = keypad 7 9 5
+  { up: K(0x48), down: K(0x50), left: K(0x4b), right: K(0x4d), b1: K(0x52), b2: K(0x53), b3: K(0x1c, 1), b4: K(0x47), b5: K(0x49), b6: K(0x4c), start: K(0x05), coin: K(0x09) }
 ];
 // RetroPad bit -> MAME action. Arcade order: B 1, A 2, Y 3, X 4, L 5, R 6 (the same A/B/C/D that pads.js uses); Select = coin.
 const BIT_ACTION = { 0: 'b1', 8: 'b2', 1: 'b3', 9: 'b4', 10: 'b5', 11: 'b6', 2: 'coin', 3: 'start', 4: 'up', 5: 'down', 6: 'left', 7: 'right' };
