@@ -78,7 +78,7 @@
   let started=false;
   try {
     if(!file)throw new Error('Falta el juego. Volvé al inicio.');
-    if(system==='switch')throw new Error('Este juego solo corre en el emulador de la PC: abrilo desde la biblioteca con "Jugar en la PC".');
+    if(system==='switch')throw new Error('Este juego solo corre en el emulador de la PC: abrilo desde la biblioteca con "▶ Jugar".');
     let core=qs.get('core')||defaults[system]||(/\.nes$/i.test(file)?'nes':/\.(bin|md|smd|gen)$/i.test(file)?'segaMD':null);
     const allowed=system==='subidos'?Object.keys(choices):system==='arcade'?['fbneo','mame2003_plus','mame2003']:[defaults[system]];
     if(core&&!allowed.includes(core))throw new Error('Ese emulador no sirve para este sistema.');
