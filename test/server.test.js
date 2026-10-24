@@ -9,7 +9,7 @@ const { WebSocket } = require('ws');
 const { io } = require('socket.io-client');
 const AdmZip = require('adm-zip');
 const { DatabaseSync } = require('node:sqlite');
-const { createRemoteGame } = require('../server');
+const { createRemoteGame, groupSwitch } = require('../server');
 let temp, game, base, quits = 0;
 // Covers: the download is simulated, so these tests never touch the Internet.
 const downloads = [];
@@ -733,4 +733,197 @@ test('Tunnel switch: only this PC with its header; the choice is saved in settin
     for(const bad of [{},{on:'yes'},{on:1}])assert.equal((await call('POST',bad)).status,400);
     assert.deepEqual(saved(),{gamesRoot:root,share:false});
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+// ---- Native emulators: Switch library, detection and POST /api/launch (the real programs are never started)
+const SWITCH_FILES = [
+  'Mario Kart 8 Deluxe/Mario Kart 8 Deluxe [0100152000022000][v0] (6.77 GB).nsp',
+  'Mario Kart 8 Deluxe/Mario Kart 8 Deluxe [0100152000022800][v1441792] (4.52 GB).nsp',
+  'Mario Kart 8 Deluxe/Mario Kart 8 Deluxe [DLC Booster Course Pass] [0100152000023001][v65536].nsp',
+  'Super Mario Galaxy 1-2/Super Mario Galaxy/Super Mario Galaxy [010099C022B96000][v0] (3.30 GB).nsp',
+  'Super Mario Galaxy 1-2/Super Mario Galaxy/Super Mario Galaxy [010099C022B96800][v327680] (0.32 GB).nsp',
+  'Super Mario Galaxy 1-2/Super Mario Galaxy 2/Super Mario Galaxy 2 [0100FD8022DAA000][v0] (2.62 GB).nsp',
+  'Super Mario Galaxy 1-2/Super Mario Galaxy 2/Super Mario Galaxy 2 [0100FD8022DAA800][v393216] (0.23 GB).nsp',
+  'Super Mario Party Jamboree/Super Mario Party Jamboree [0100965017338000][v0].nsp',
+  'Super Mario Party Jamboree/Super Mario Party Jamboree [0100965017338800][v458752].nsp'
+];
+// A games folder with MAME, Eden and a decoy MAME outside the "Emulador" folders.
+function emuRoot() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remotegame-emu-'));
+  const put = rel => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'x'); return f; };
+  const exes = { mame: put('MAME/Emulador/MAME/mame.exe'), eden: put('Nintendo Switch 1/Emulador/Eden/eden.exe'), flycast: put('Naomi-Naomi2-Atomiswave/Emulador/Flycast/flycast.exe') };
+  put('Nintendo Switch 1/Emulador/Eden/eden-cli.exe'); put('Stuff/mame.exe');
+  put('MAME/Roms/kinst2.zip'); put('MAME/Roms/mslug.zip'); put('MAME/Roms/-evil.zip');
+  for (const f of SWITCH_FILES) put('Nintendo Switch 1/Roms/' + f);
+  return { root, exes };
+}
+const fakeSpawner = mode => {
+  const spawn = (exe, args, opts) => {
+    const child = new EventEmitter(); child.pid = 4242; child.unref = () => {};
+    if (mode === 'enoent') { child.pid = undefined; process.nextTick(() => child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }))); }
+    spawn.calls.push({ exe, args, opts, child });
+    return child;
+  };
+  spawn.calls = [];
+  return spawn;
+};
+const launchCall = (url, body, headers = { 'X-RemoteGame': 'launch' }) => fetch(url + '/api/launch', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+
+test('Switch: base games only, updates and DLC grouped by title id; without ids, by title', () => {
+  const files = SWITCH_FILES.map(f => ({ file: path.basename(f), full: '/x/' + f }));
+  const games = groupSwitch(files);
+  assert.deepEqual(games.map(g => g.file), [
+    'Mario Kart 8 Deluxe [0100152000022000][v0] (6.77 GB).nsp',
+    'Super Mario Galaxy [010099C022B96000][v0] (3.30 GB).nsp',
+    'Super Mario Galaxy 2 [0100FD8022DAA000][v0] (2.62 GB).nsp',
+    'Super Mario Party Jamboree [0100965017338000][v0].nsp'
+  ]);
+  const by = Object.fromEntries(games.map(g => [g.file.split(' [')[0], g]));
+  assert.deepEqual(by['Mario Kart 8 Deluxe'].updates, [{ file: 'Mario Kart 8 Deluxe [0100152000022800][v1441792] (4.52 GB).nsp', version: 1441792 }]);
+  assert.equal(by['Mario Kart 8 Deluxe'].dlc, 1);
+  // Galaxy 1 and 2 have their own ids: neither takes the other's update.
+  assert.equal(by['Super Mario Galaxy'].updates[0].version, 327680);
+  assert.equal(by['Super Mario Galaxy 2'].updates[0].version, 393216);
+  assert.equal(by['Super Mario Galaxy'].dlc + by['Super Mario Galaxy 2'].dlc + by['Super Mario Party Jamboree'].dlc, 0);
+  // Several updates: newest first. An update or DLC with no base game is not listed.
+  const more = groupSwitch([
+    { file: 'A [0100000000001000][v0].nsp' }, { file: 'A [0100000000001800][v65536].nsp' }, { file: 'A [0100000000001800][v131072].nsp' },
+    { file: 'A DLC [0100000000002001][v1].nsp' }, { file: 'A DLC 2 [0100000000002002][v1].nsp' },
+    { file: 'Orphan [0100000000009800][v1].nsp' }, { file: 'Orphan DLC [0100000000010001][v1].nsp' }
+  ]);
+  assert.equal(more.length, 1); assert.deepEqual(more[0].updates.map(u => u.version), [131072, 65536]); assert.equal(more[0].dlc, 2);
+  // No ids (plain dumps): a base unless tagged, extras found by title.
+  const plain = groupSwitch([{ file: 'Cool Game.xci' }, { file: 'Cool Game [UPD][v2].nsp' }, { file: 'Cool Game [DLC Pack].nsp' }, { file: 'Other Game.nsp' }]);
+  assert.deepEqual(plain.map(g => [g.file, g.updates.length, g.dlc]), [['Cool Game.xci', 1, 1], ['Other Game.nsp', 0, 0]]);
+});
+
+test('Switch: the library lists the base games with clean titles; there is no web player for them', async () => {
+  const { root } = emuRoot();
+  const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json') });
+  try {
+    const list = await (await fetch(url + '/api/games?system=switch')).json();
+    assert.equal(list.total, 4);   // Mario Kart 8, Galaxy 1, Galaxy 2, Party Jamboree
+    assert.deepEqual(list.games.map(x => x.name), ['Mario Kart 8 Deluxe', 'Super Mario Galaxy', 'Super Mario Galaxy 2', 'Super Mario Party Jamboree']);
+    const mk = list.games[0];
+    assert.equal(mk.extra, 'Actualización v1441792 · 1 DLC');
+    assert.equal(mk.file, 'Mario Kart 8 Deluxe [0100152000022000][v0] (6.77 GB).nsp');
+    assert.equal(mk.play, null); assert.equal(mk.pcOnly, true); assert.equal(mk.pc, true); assert.equal(mk.systemLabel, 'Nintendo Switch');
+    assert.equal((await fetch(url + '/api/rom/switch/' + encodeURIComponent(mk.file))).status, 404);
+    assert.equal((await fetch(url + '/api/cover/switch/' + encodeURIComponent(mk.file))).status, 404);   // no source knows it: the card shows the placeholder
+    const sys = await (await fetch(url + '/api/systems')).json();
+    const s = sys.systems.find(x => x.id === 'switch');
+    assert.equal(s.count, 4); assert.equal(s.pcOnly, true); assert.equal(sys.owner, true);
+    assert.equal(sys.systems.find(x => x.id === 'arcade').pc, true); assert.equal(sys.systems.find(x => x.id === 'nes').pc, false);
+    assert.equal((await (await fetch(url + '/api/systems', { headers: { 'X-Forwarded-For': '203.0.113.9' } })).json()).owner, false);
+    // The settings scan finds the folder by its name ("Nintendo Switch 1") and counts the games inside the nested folders.
+    const scan = await (await fetch(url + '/api/settings/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-RemoteGame': 'settings' }, body: JSON.stringify({ gamesRoot: root }) })).json();
+    const found = scan.consoles.find(c => c.id === 'switch');
+    assert.equal(found.dir, path.join(root, 'Nintendo Switch 1', 'Roms')); assert.equal(found.count, 9);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Emulators: found inside the games folder ("Emulador" first); the options and settings.json can override', async () => {
+  const { root, exes } = emuRoot();
+  const settingsFile = path.join(root, 'settings.json');
+  const custom = path.join(root, 'Stuff', 'mame.exe'), eden2 = path.join(root, 'Stuff', 'eden.exe');
+  fs.writeFileSync(eden2, 'x');
+  let a = await instance({ gamesRoot: root, settingsFile });
+  try {
+    assert.deepEqual(a.g.emulators(), exes);   // the decoy mame.exe (shallower, but outside "Emulador") loses
+    // 5 levels down is not looked at, and nothing is invented when nothing is there.
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'remotegame-noemu-'));
+    fs.mkdirSync(path.join(empty, 'a', 'b', 'c', 'd', 'e'), { recursive: true }); fs.writeFileSync(path.join(empty, 'a', 'b', 'c', 'd', 'e', 'mame.exe'), 'x');
+    const b = await instance({ gamesRoot: empty, settingsFile: path.join(empty, 's.json') });
+    try { assert.deepEqual(b.g.emulators(), { mame: null, eden: null, flycast: null }); } finally { await b.g.close(); fs.rmSync(empty, { recursive: true, force: true }); }
+  } finally { await a.g.close(); }
+  // settings.json wins over the search (read on every launch); the options win over settings.json.
+  fs.writeFileSync(settingsFile, JSON.stringify({ emulators: { mame: custom, eden: '"' + eden2 + '"' } }));
+  a = await instance({ gamesRoot: root, settingsFile });
+  try { assert.deepEqual(a.g.emulators(), { ...exes, mame: custom, eden: eden2 }); } finally { await a.g.close(); }
+  a = await instance({ gamesRoot: root, settingsFile, emulators: { mame: exes.mame } });
+  try { assert.equal(a.g.emulators().mame, exes.mame); assert.equal(a.g.emulators().eden, eden2); } finally { await a.g.close(); }
+  // A configured path that does not exist is an error, not a silent fallback.
+  fs.writeFileSync(settingsFile, JSON.stringify({ emulators: { mame: path.join(root, 'nope.exe') } }));
+  const spawn = fakeSpawner();
+  a = await instance({ gamesRoot: root, settingsFile, spawnEmulator: spawn });
+  try {
+    const r = await launchCall(a.url, { system: 'arcade', file: 'kinst2.zip' });
+    assert.equal(r.status, 404); assert.equal((await r.json()).msg, 'La ruta de MAME en los ajustes no existe.');
+    assert.equal(spawn.calls.length, 0);
+  } finally { await a.g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch: exact MAME and Eden command lines, detached, in the emulator folder; one at a time', async () => {
+  const { root, exes } = emuRoot();
+  const spawn = fakeSpawner();
+  const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: spawn });
+  try {
+    // Arcade: the set name, MAME's own folder as cwd, the arcade folder first in the ROM path.
+    let r = await launchCall(url, { system: 'arcade', file: 'kinst2.zip' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { ok: true, emulator: 'MAME', name: 'kinst2' });
+    assert.equal(spawn.calls.length, 1);
+    assert.equal(spawn.calls[0].exe, exes.mame);
+    assert.deepEqual(spawn.calls[0].args, ['kinst2', '-keyboardprovider', 'win32', '-window', '-maximize', '-rompath', path.join(root, 'MAME', 'Roms') + ';roms']);
+    assert.deepEqual(spawn.calls[0].opts, { cwd: path.dirname(exes.mame), detached: true, stdio: 'ignore', windowsHide: false });
+    // A second one while the first is alive: told so, nothing starts, and where to continue.
+    r = await launchCall(url, { system: 'arcade', file: 'mslug.zip' });
+    assert.equal(r.status, 409);
+    const busy = await r.json();
+    assert.equal(busy.busy, true); assert.equal(busy.emulator, 'MAME'); assert.equal(busy.name, 'kinst2'); assert.equal(busy.system, 'arcade'); assert.match(busy.msg, /Ya abrí MAME/);
+    assert.equal(spawn.calls.length, 1);
+    // Closed by the player: the next one opens. Switch: Eden with the base game's real path (inside its own folders).
+    spawn.calls[0].child.emit('exit', 0);
+    const mk = (await (await fetch(url + '/api/games?system=switch')).json()).games[0];
+    r = await launchCall(url, { system: 'switch', file: mk.file });
+    assert.deepEqual(await r.json(), { ok: true, emulator: 'Eden', name: 'Mario Kart 8 Deluxe' });
+    assert.equal(spawn.calls[1].exe, exes.eden);
+    assert.deepEqual(spawn.calls[1].args, ['-g', path.join(root, 'Nintendo Switch 1', 'Roms', 'Mario Kart 8 Deluxe', mk.file)]);
+    assert.equal(spawn.calls[1].opts.cwd, path.dirname(exes.eden)); assert.equal(spawn.calls[1].opts.detached, true);
+    // A name that MAME would read as an option never reaches it.
+    spawn.calls[1].child.emit('exit', 0);
+    r = await launchCall(url, { system: 'arcade', file: '-evil.zip' });
+    assert.equal(r.status, 500); assert.equal(spawn.calls.length, 2);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch: only this PC with its header, only library games; clear errors when the emulator is missing or fails', async () => {
+  const { root } = emuRoot();
+  const spawn = fakeSpawner();
+  const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: spawn });
+  const body = { system: 'arcade', file: 'kinst2.zip' };
+  const hostCall = host => new Promise((resolve, reject) => {
+    const u = new URL(url + '/api/launch');
+    const req = require('node:http').request({ host: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers: { Host: host, 'Content-Type': 'application/json', 'X-RemoteGame': 'launch' } }, res => { res.resume(); resolve(res.statusCode); });
+    req.on('error', reject); req.end(JSON.stringify(body));
+  });
+  try {
+    // No header, another header, through the tunnel, or a foreign Host (DNS rebinding): 403.
+    for (const headers of [{}, { 'X-RemoteGame': 'settings' }, { 'X-RemoteGame': 'launch', 'X-Forwarded-For': '203.0.113.9' }]) assert.equal((await launchCall(url, body, headers)).status, 403, JSON.stringify(headers));
+    assert.equal(await hostCall('evil.example'), 403);
+    assert.equal((await fetch(url + '/api/launch', { method: 'OPTIONS', headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' } })).headers.get('access-control-allow-origin'), null);
+    assert.equal(spawn.calls.length, 0);
+    // Not a game of the library, a bad name, a system with no native emulator, an empty body.
+    for (const [b, status] of [[{ system: 'arcade', file: 'nope.zip' }, 404], [{ system: 'switch', file: 'Nope.nsp' }, 404], [{ system: 'arcade', file: '..\\kinst2.zip' }, 400], [{ system: 'arcade', file: '../x.zip' }, 400],
+      [{ system: 'nes', file: 'test.nes' }, 400], [{ system: 'nope', file: 'a.zip' }, 400], [{}, 400]]) assert.equal((await launchCall(url, b)).status, status, JSON.stringify(b));
+    assert.equal(spawn.calls.length, 0);
+    // A program that cannot start (blocked, deleted) says so and frees the slot.
+    const bad = fakeSpawner('enoent');
+    const other = await instance({ gamesRoot: root, settingsFile: path.join(root, 's2.json'), spawnEmulator: bad });
+    try {
+      const r = await launchCall(other.url, body);
+      assert.equal(r.status, 500); assert.equal((await r.json()).msg, 'No pude abrir MAME: el programa no existe.');
+      assert.equal((await launchCall(other.url, body)).status, 500);   // not "busy": the failed one is not kept
+      assert.equal(bad.calls.length, 2);
+    } finally { await other.g.close(); }
+    // No emulator in the games folder.
+    fs.rmSync(path.join(root, 'MAME', 'Emulador'), { recursive: true });
+    fs.rmSync(path.join(root, 'Stuff'), { recursive: true });
+    const none = await instance({ gamesRoot: root, settingsFile: path.join(root, 's3.json'), spawnEmulator: spawn });
+    try {
+      const r = await launchCall(none.url, body);
+      assert.equal(r.status, 404); assert.equal((await r.json()).msg, 'No encontré MAME en tu carpeta de juegos.');
+    } finally { await none.g.close(); }
+    assert.equal(spawn.calls.length, 0);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });

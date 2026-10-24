@@ -27,6 +27,27 @@ const BUILD = (() => {
   return hash.update(process.env.REMOTEGAME_BUILD_SALT || '').digest('hex').slice(0, 12);
 })();
 
+// Switch dumps read "<Title> [<16 hex title id>][v<version>] (size).nsp". The id tells what a file is: ...000 is the base
+// game, ...800 its update, any other tail (...001) DLC. An update shares the base's id up to the last 3 digits; a DLC id is
+// the base's plus 0x1000 (and a small index), so one block down it points at the base. Without an id (a plain
+// "Game.xci"), a file is a base unless tagged [DLC]/[UPD], and extras are matched by the title. Returns only the base
+// games, each with its `updates` ([{ file, version }], newest first) and `dlc` count; extras with no base are dropped.
+function groupSwitch(files) {
+  const nameKey = f => f.replace(/\.[^.]+$/, '').replace(/\s*[\[(][^\])]*[\])]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const info = files.map(x => {
+    const idm = x.file.match(/\[([0-9a-f]{16})\]/i), id = idm ? BigInt('0x' + idm[1]) : null;
+    const low = id === null ? -1 : Number(id & 0xfffn);
+    const kind = id !== null ? (low === 0 ? 'base' : low === 0x800 ? 'update' : 'dlc') : /\[DLC/i.test(x.file) ? 'dlc' : /\[(UPD|Update)/i.test(x.file) ? 'update' : 'base';
+    const app = id === null ? null : kind === 'dlc' ? (id >> 12n) - 1n : id >> 12n;
+    return { ...x, kind, app, key: nameKey(x.file), version: Number((x.file.match(/\[v(\d+)\]/i) || [])[1]) || 0 };
+  });
+  const mine = (b, x) => x.app !== null && b.app !== null ? x.app === b.app : x.key === b.key;
+  return info.filter(x => x.kind === 'base').map(b => {
+    const updates = info.filter(x => x.kind === 'update' && mine(b, x)).sort((p, q) => q.version - p.version).map(x => ({ file: x.file, version: x.version }));
+    return { file: b.file, full: b.full, updates, dlc: info.filter(x => x.kind === 'dlc' && mine(b, x)).length };
+  });
+}
+
 function createRemoteGame(options = {}) {
 const PORT = options.port ?? (process.env.PORT ? Number(process.env.PORT) : cfg.port);
 // The games folder, in order of priority: option / GAMES_ROOT variable, settings.json (git-ignored,
@@ -48,9 +69,11 @@ game.vpad = options.vpad || createVpad({ dsuPort: options.dsuPort ?? (testing ? 
 const SYSTEMS = {
   nes:     { label: 'NES / Family', dir: path.join(GAMES_ROOT, 'NES'), exts: ['.nes', '.zip'], ejs: 'nes', lb: 'Nintendo Entertainment System', lr: ['Nintendo - Nintendo Entertainment System'] },
   genesis: { label: 'Sega Genesis', dir: path.join(GAMES_ROOT, 'Sega Genesis'), exts: ['.bin', '.md', '.smd', '.gen', '.zip'], ejs: 'segaMD', lb: 'Sega Genesis', lr: ['Sega - Mega Drive - Genesis'] },
-  arcade:  { label: 'Arcade / Neo Geo', dir: path.join(GAMES_ROOT, 'MAME', 'Roms'), exts: ['.zip'], ejs: 'fbneo', lb: 'Arcade', lr: ['FBNeo - Arcade Games', 'MAME'] },
+  arcade:  { label: 'Arcade / Neo Geo', dir: path.join(GAMES_ROOT, 'MAME', 'Roms'), exts: ['.zip'], ejs: 'fbneo', emu: 'mame', lb: 'Arcade', lr: ['FBNeo - Arcade Games', 'MAME'] },
   snes: { label: 'Super Nintendo', dir: path.join(GAMES_ROOT, 'Super Nintendo', 'Roms'), exts: ['.sfc', '.smc', '.zip'], ejs: 'snes', lb: 'Super Nintendo Entertainment System', lr: ['Nintendo - Super Nintendo Entertainment System'] },
   n64: { label: 'Nintendo 64', dir: path.join(GAMES_ROOT, 'Nintendo 64', 'Roms'), exts: ['.z64', '.n64', '.v64', '.zip'], ejs: 'n64', lb: 'Nintendo 64', lr: ['Nintendo - Nintendo 64'] },
+  // Switch has no web player: it only opens in Eden on this PC (pcOnly). Its dumps sit in one folder per game (deep).
+  switch: { label: 'Nintendo Switch', dir: path.join(GAMES_ROOT, 'Nintendo Switch 1', 'Roms'), exts: ['.nsp', '.xci'], emu: 'eden', pcOnly: true, deep: true, lb: 'Nintendo Switch' },
   subidos: { label: 'Subidos', dir: LOCAL_ROMS, exts: ['.nes', '.zip', '.bin', '.md', '.smd', '.gen'], writable: true }
 };
 for (const id of Object.keys(SYSTEMS)) SYSTEMS[id].id = id;
@@ -62,13 +85,25 @@ const FOLDER_NAMES = {
   genesis: /^(genesis|megadrive|megadrivegenesis|genesismegadrive|segagenesis|segamegadrive|segamegadrivegenesis)$/,
   arcade: /^(mame|arcade|fbneo|fba|finalburnneo|neogeo|mame2003|mame2003plus)$/,
   snes: /^(snes|supernes|superfamicom|supernintendo|nintendosnes|supernintendoentertainmentsystem)$/,
-  n64: /^(n64|nintendo64)$/
+  n64: /^(n64|nintendo64)$/,
+  switch: /^(switch|switch1|nintendoswitch|nintendoswitch1)$/
 };
-const DEFAULT_DIRS = { nes: ['NES'], genesis: ['Sega Genesis'], arcade: ['MAME', 'Roms'], snes: ['Super Nintendo', 'Roms'], n64: ['Nintendo 64', 'Roms'] };
+const DEFAULT_DIRS = { nes: ['NES'], genesis: ['Sega Genesis'], arcade: ['MAME', 'Roms'], snes: ['Super Nintendo', 'Roms'], n64: ['Nintendo 64', 'Roms'], switch: ['Nintendo Switch 1', 'Roms'] };
+// Every file with one of these extensions under dir, a few folders deep (Switch dumps live in one folder per game).
+function walkRoms(dir, exts, depth = 3) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return []; }
+  const out = [];
+  for (const e of entries) {
+    if (e.isFile() && exts.some(x => e.name.toLowerCase().endsWith(x))) out.push({ file: e.name, full: path.join(dir, e.name) });
+    else if (e.isDirectory() && depth > 0 && !e.name.startsWith('.')) out.push(...walkRoms(path.join(dir, e.name), exts, depth - 1));
+  }
+  return out;
+}
 function findConsoleDirs(root) {
   const found = {};
   const queue = [[root, 1]];
-  const count = (dir, id) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile() && SYSTEMS[id].exts.some(x => e.name.toLowerCase().endsWith(x))).length; } catch (e) { return 0; } };
+  const count = (dir, id) => { if (SYSTEMS[id].deep) return walkRoms(dir, SYSTEMS[id].exts).length; try { return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile() && SYSTEMS[id].exts.some(x => e.name.toLowerCase().endsWith(x))).length; } catch (e) { return 0; } };
   for (let i = 0; i < queue.length && i < 1500; i++) {
     const [dir, depth] = queue[i];
     let entries;
@@ -92,12 +127,12 @@ function findConsoleDirs(root) {
   }
   return found;
 }
-let consoleDirs = {};
+let consoleDirs = {}, emuCache = null;
 // Points every console at its detected folder (or the usual place, which then reads as missing).
 function applyRoot() {
   consoleDirs = findConsoleDirs(GAMES_ROOT);
   for (const id of Object.keys(DEFAULT_DIRS)) SYSTEMS[id].dir = consoleDirs[id] ? consoleDirs[id].dir : path.join(GAMES_ROOT, ...DEFAULT_DIRS[id]);
-  sysIndex.clear(); coverCache.clear(); localCovers.clear();
+  sysIndex.clear(); coverCache.clear(); localCovers.clear(); emuCache = null;
 }
 
 function getSys(id) {
@@ -346,18 +381,23 @@ function systemItems(id) {
   let files = [];
   try { files = fs.readdirSync(sys.dir); } catch (e) { sysIndex.delete(id); return null; }
   const items = [];
+  // Switch: only base games are listed; their updates and DLC hang off them (groupSwitch).
+  const deep = sys.deep ? groupSwitch(walkRoms(sys.dir, sys.exts)) : null;
+  if (deep) files = deep.map(d => d.file);
+  const deepBy = deep ? new Map(deep.map(d => [d.file, d])) : null;
   for (const f of files) {
     const low = f.toLowerCase();
     // BIOS and sound/CPU device sets: needed by some games, not playable on their own.
     if (id === 'arcade' && /^(neogeo|pgm|skns|stvbios|qsound|qsound_hle|m68705p5|namcoc76|tms320c32|ym2413|sys246|sys256|coh1002m)\.zip$/i.test(f)) continue;
     if (!sys.exts.some(e => low.endsWith(e))) continue;
     let size = 0;
-    try { const stat = fs.statSync(path.join(sys.dir, f)); if (!stat.isFile()) continue; size = stat.size; } catch (e) { continue; }
+    const part = deepBy && deepBy.get(f);
+    try { const stat = fs.statSync(part ? part.full : path.join(sys.dir, f)); if (!stat.isFile()) continue; size = stat.size; } catch (e) { continue; }
     const { name, year, tag } = gameInfo(sys, f);
     // Search the full title and the file name: "metal slug" and "mslug" both work. The title also
     // goes in Spanish spelling (-tion -> -cion), so "internacional" finds "International Superstar Soccer".
     const title = squash(name);
-    items.push({ file: f, name, year, size, tag, hay: title + ' ' + title.replace(/tion/g, 'cion') + ' ' + squash(f), system: id, compat: id === 'arcade' ? arcadeCompat(sys.dir, f, dirStat.mtimeMs) : null });
+    items.push({ file: f, name, year, size, tag, hay: title + ' ' + title.replace(/tion/g, 'cion') + ' ' + squash(f), system: id, compat: id === 'arcade' ? arcadeCompat(sys.dir, f, dirStat.mtimeMs) : null, full: part ? part.full : path.join(sys.dir, f), updates: part ? part.updates : [], dlc: part ? part.dlc : 0 });
   }
   items.sort((a, b) => collator.compare(a.name, b.name) || collator.compare(a.file, b.file));
   // Same title twice in one console (US and Europe dumps): tell them apart by region tag.
@@ -376,10 +416,14 @@ function gameJson(it) {
   const local = localCover(it.system, it.file), cover = local ? { id: 'l' + local.v } : coverList(it.system, it.file)[0];
   const out = {
     file: it.file, name: it.name, year: it.year, size: it.size, system: it.system, systemLabel: sys.label,
-    play: '/play-ejs.html?system=' + it.system + '&file=' + encodeURIComponent(it.file) + core,
+    play: sys.pcOnly ? null : '/play-ejs.html?system=' + it.system + '&file=' + encodeURIComponent(it.file) + core,
     cover: cover ? '/api/cover/' + it.system + '/' + encodeURIComponent(it.file) + '?v=' + cover.id + '-' + COVER_WIDTH : null
   };
   if (it.variant) out.variant = it.variant;
+  // Opens in a native emulator on this PC (POST /api/launch); pcOnly: there is no web player at all.
+  if (sys.emu) out.pc = true;
+  if (sys.pcOnly) out.pcOnly = true;
+  if (it.updates && (it.updates.length || it.dlc)) out.extra = [it.updates.length ? 'Actualización' + (it.updates[0].version ? ' v' + it.updates[0].version : '') : '', it.dlc ? it.dlc + ' DLC' : ''].filter(Boolean).join(' · ');
   if (it.compat && it.compat.reason) { out.compat = false; out.reason = it.compat.reason; }
   return out;
 }
@@ -718,9 +762,10 @@ app.get('/api/systems', (req, res) => {
   const local = fromThisPc(req);
   res.json({
     gamesRoot: local ? GAMES_ROOT : undefined,
+    owner: local && hostOk(req),   // may the page offer "Jugar en la PC" (the same test /api/launch applies)
     systems: Object.keys(SYSTEMS).map(id => {
       const index = systemItems(id);
-      return { id, label: SYSTEMS[id].label, count: index ? index.items.length : 0, writable: !!SYSTEMS[id].writable, core: SYSTEMS[id].ejs || null, onlinePlayers: 2, onlineExperimental: id !== 'nes', missing: index ? null : local ? SYSTEMS[id].dir : true };
+      return { id, label: SYSTEMS[id].label, count: index ? index.items.length : 0, writable: !!SYSTEMS[id].writable, core: SYSTEMS[id].ejs || null, pc: !!SYSTEMS[id].emu, pcOnly: !!SYSTEMS[id].pcOnly, onlinePlayers: 2, onlineExperimental: id !== 'nes', missing: index ? null : local ? SYSTEMS[id].dir : true };
     })
   });
 });
@@ -777,6 +822,79 @@ const pickFolder = options.pickFolder || (() => new Promise((resolve, reject) =>
     { windowsHide: true, timeout: 180000, encoding: 'utf8' }, (err, out) => err ? reject(new Error('No pude abrir el selector de carpetas.')) : resolve(out.trim() || null));
 }));
 
+// Native emulators on this PC. Each is found inside the games folder (up to 4 levels, a folder called "Emulador"
+// first) unless a path says otherwise; in order of priority: options.emulators, the MAME_EXE / EDEN_EXE / FLYCAST_EXE
+// variables, settings.json -> emulators: { mame, eden, flycast }, then the search. RemoteGame only starts them: their
+// own config and saves are theirs. Flycast is found but no console uses it yet.
+const EMULATORS = {
+  mame: {
+    name: 'MAME',
+    // The keyboard provider makes MAME see the keys vpad.js injects; the games folder goes first in the ROM path (the ini is left alone).
+    args: (exe, sys, it) => {
+      const code = it.file.replace(/\.zip$/i, '');
+      if (!/^\w+$/.test(code)) throw new Error('Nombre de juego inválido');
+      return [code, '-keyboardprovider', 'win32', '-window', '-maximize', '-rompath', sys.dir + ';roms'];
+    }
+  },
+  // Eden is a yuzu fork: -g <file> boots a game (src/core/launch_params.cpp); no -f, so it opens in a window the browser can capture.
+  eden: { name: 'Eden', args: (exe, sys, it) => ['-g', it.full] },
+  flycast: { name: 'Flycast', args: (exe, sys, it) => [it.full] }
+};
+const isFile = p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } };
+function scanEmulators(root) {
+  const want = new Map(Object.keys(EMULATORS).map(id => [id + '.exe', id]));
+  const skip = /^(roms?|covers|node_modules|artwork|bios|firmware|keys|\$recycle\.bin|system volume information)$/i;
+  const found = {}, rank = {};
+  const queue = [[root, 0, false]];
+  for (let i = 0; i < queue.length && i < 3000; i++) {
+    const [dir, depth, inEmu] = queue[i];
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of entries) {
+      const id = e.isFile() ? want.get(e.name.toLowerCase()) : null;
+      const r = (inEmu ? 0 : 10) + depth;
+      if (id && (!found[id] || r < rank[id])) { found[id] = path.join(dir, e.name); rank[id] = r; }
+      else if (e.isDirectory() && depth < 4 && !e.name.startsWith('.') && !skip.test(e.name)) queue.push([path.join(dir, e.name), depth + 1, inEmu || /emulad|emulator/i.test(e.name)]);
+    }
+  }
+  return found;
+}
+// { exe, configured }: exe is null when not found (or the configured path is not a file). The search is cached;
+// a miss is searched again at most every 5 s, so an emulator copied in meanwhile shows up.
+function findEmulator(id) {
+  const set = (options.emulators || {})[id] || process.env[id.toUpperCase() + '_EXE'] || (readSettings().emulators || {})[id];
+  if (set) { const p = cleanDir(set); return { exe: p && isFile(p) ? p : null, configured: true }; }
+  if (!emuCache || emuCache.root !== GAMES_ROOT || (!isFile(emuCache.found[id] || '') && Date.now() - emuCache.at > 5000)) emuCache = { root: GAMES_ROOT, at: Date.now(), found: scanEmulators(GAMES_ROOT) };
+  return { exe: emuCache.found[id] || null, configured: false };
+}
+// Opens a game in its native emulator. Only this PC with its header; one emulator started by RemoteGame at a time.
+const spawnEmulator = options.spawnEmulator || require('child_process').spawn;
+let running = null;
+app.post('/api/launch', ownerOnly('launch'), async (req, res) => {
+  const body = req.body || {};
+  const sys = getSys(body.system), file = safeFile(body.file);
+  if (!sys || !file) return res.status(400).json({ ok: false, msg: 'Sistema o archivo inválido.' });
+  const emu = EMULATORS[sys.emu];
+  if (!emu) return res.status(400).json({ ok: false, msg: 'Ese sistema no se abre en un emulador de la PC.' });
+  const index = systemItems(sys.id), it = index && index.byFile.get(file);
+  if (!it) return res.status(404).json({ ok: false, msg: 'Ese juego no está en la biblioteca.' });
+  if (running && !running.done) return res.status(409).json({ ok: false, busy: true, emulator: running.emulator, name: running.name, system: running.system, msg: 'Ya abrí ' + running.emulator + ' para ' + running.name + '. Cerralo para abrir otro juego, o seguí con ese.' });
+  const found = findEmulator(sys.emu);
+  if (!found.exe) return res.status(404).json({ ok: false, msg: found.configured ? 'La ruta de ' + emu.name + ' en los ajustes no existe.' : 'No encontré ' + emu.name + ' en tu carpeta de juegos.' });
+  const entry = running = { emulator: emu.name, name: it.name, system: sys.id, done: false };   // taken before awaiting: two clicks cannot both launch
+  let failure = null;
+  try {
+    const child = spawnEmulator(found.exe, emu.args(found.exe, sys, it), { cwd: path.dirname(found.exe), detached: true, stdio: 'ignore', windowsHide: false });
+    child.on('error', e => { failure = failure || e; entry.done = true; });
+    child.on('exit', () => { entry.done = true; });
+    if (child.unref) child.unref();
+    // A missing or blocked program reports its error on the next tick.
+    await new Promise(resolve => setImmediate(resolve));
+  } catch (e) { failure = e; }
+  if (failure) { if (running === entry) running = null; return res.status(500).json({ ok: false, msg: 'No pude abrir ' + emu.name + ': ' + (failure.code === 'ENOENT' ? 'el programa no existe.' : failure.message) }); }
+  res.json({ ok: true, emulator: emu.name, name: it.name });
+});
+
 app.get('/api/games', (req, res) => {
   const sysId = String(req.query.system || 'nes').toLowerCase();
   // system=all searches every console; not=<id> leaves one out (the "other consoles" section).
@@ -823,6 +941,7 @@ app.get('/api/cover/:system/:file', async (req, res) => {
 app.get('/api/rom/:system/:file', (req, res) => {
   const sys = getSys(req.params.system);
   if (!sys) return res.status(400).send('sistema invalido');
+  if (sys.pcOnly) return res.status(404).send('este sistema solo corre en un emulador de la PC');
   const f = safeFile(req.params.file);
   if (!f || !sys.exts.includes(path.extname(f).toLowerCase())) return res.status(400).send('nombre o formato invalido');
   const full = path.join(sys.dir, f);
@@ -1215,7 +1334,7 @@ async function close() {
   lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
-return Object.assign(game, { app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]) });
+return Object.assign(game, { app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]), emulators: () => Object.fromEntries(Object.keys(EMULATORS).map(id => [id, findEmulator(id).exe])) });
 }
 function openBrowser(url) {
   require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
@@ -1271,4 +1390,4 @@ if (require.main === module) {
   });
   listen();
 }
-module.exports = { createRemoteGame };
+module.exports = { createRemoteGame, groupSwitch };

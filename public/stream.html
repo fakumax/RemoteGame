@@ -30,6 +30,9 @@
 #pick:hover{filter:brightness(1.1)}
 #capinfo,#noaudio,#vpad{font-size:13px;line-height:1.5}#capinfo:empty{display:none}
 #vpad div{display:flex;gap:8px}#vpad span:first-child{color:var(--mut);min-width:9ch}
+#steps{border-color:var(--acc)}
+.steps{margin:0;padding-left:1.4em;font-size:16px;line-height:1.45}.steps li{margin:6px 0}.steps b{color:var(--acc)}
+#stepnote{margin:8px 0 0;font-size:13px;line-height:1.5;color:var(--mut)}#stepnote[hidden]{display:none}#stepnote a{color:var(--acc)}
 #helpbox summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
 #help p{margin:0 0 6px}
 @media (min-width:900px){
@@ -52,6 +55,14 @@
   <aside id="side">
     <div id="head"><a href="/">← RemoteGame</a><span class="pill p1">Transmisión · vos sos P1</span></div>
     <h1 id="title">📺 Transmitir un emulador</h1>
+    <div class="panel" id="steps" hidden>
+      <ol class="steps">
+        <li>Esperá que abra <b id="emu">el emulador</b>.</li>
+        <li>Tocá <b>Elegir ventana o pantalla</b> y elegí la ventana del juego (o la pantalla completa, con audio).</li>
+        <li>Volvé al juego y jugá.</li>
+      </ol>
+      <p id="stepnote" hidden></p>
+    </div>
     <div class="panel">
       <div id="links"></div>
       <div id="peers"></div>
@@ -81,6 +92,25 @@
   const store={get(k){try{return localStorage.getItem(k);}catch(e){return null;}},set(k,v){try{localStorage.setItem(k,v);}catch(e){}}};
   const preview=$('preview'), gname=$('gname'), mbps=$('mbps');
   gname.value=store.get(NAME_KEY)||'';
+  // Arriving from the library ("Jugar en la PC"): ?name= is the game, ?from= the console it was opened for.
+  const qs=new URLSearchParams(location.search), from=qs.get('from');
+  const pre=(qs.get('name')||'').replace(/\s+/g,' ').trim().slice(0,60);
+  if(pre)gname.value=pre;
+  const README='https://github.com/fakumax/RemoteGame#';
+  const NOTES={
+    switch:{emu:'Eden',text:'Configuración de una sola vez en Eden: Emulación → Configurar → Controles → Avanzado, tildá "Habilitar mandos UDP" y poné Jugador 2, 3 y 4 como "UDP Controller" 1, 2 y 3. ',link:'eden-switch-1'},
+    arcade:{emu:'MAME',text:'El teclado simulado para P2–P4 ya va activado desde la línea de comando. Las teclas que MAME no trae se asignan una sola vez desde el propio MAME (Tab → Input Settings). ',link:'mame-suelto-arcades'}
+  };
+  if(pre||NOTES[from]){
+    const n=NOTES[from];
+    $('steps').hidden=false;
+    if(n){
+      $('emu').textContent=n.emu;
+      const note=$('stepnote'),a=document.createElement('a');
+      a.href=README+n.link;a.target='_blank';a.rel='noopener';a.textContent='Ver cómo en el README';
+      note.append(n.text,a,'.');note.hidden=false;
+    }
+  }
   if([...mbps.options].some(o=>o.value===store.get(MBPS_KEY)))mbps.value=store.get(MBPS_KEY);
   // The banner (links and who is in) is there from the start; the room opens when something is being shared.
   RemoteShare.banner($('links'));
