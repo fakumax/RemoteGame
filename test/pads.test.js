@@ -138,6 +138,14 @@ test('Pads: host input in local 2P gives each live pad its own player and keyboa
   assert.deepEqual(calls.sort(), [[0, 8, 1], [1, 0, 1]].sort());
 });
 
+test('Pads: host input in local mode takes up to 4 pads, one per player', () => {
+  const calls = [];
+  const input = pads.hostInput('fbneo', false, (p, i, v) => calls.push([p, i, v]));
+  const four = [0, 1, 2, 3].map(n => pad('Xbox 360 Controller (XInput STANDARD GAMEPAD)', [0], [0, 0], { index: n }));
+  input.pads(four);
+  assert.deepEqual(calls.sort(), [[0, 0, 1], [1, 0, 1], [2, 0, 1], [3, 0, 1]]);
+});
+
 test('Pads: host input maps the N64 keyboard stick and C buttons', () => {
   const calls = [];
   const input = pads.hostInput('n64', true, (p, i, v) => calls.push([p, i, v]));

@@ -6,13 +6,37 @@
 <title>RemoteGame · Emulador</title>
 <link rel="stylesheet" href="/style.css">
 <style>
-#fsbox{width:min(960px,100%);aspect-ratio:4/3;height:min(720px,75vw);position:relative;margin:12px auto;background:#000}
+/* Desktop: the game takes the height of the window (4:3) and a narrow column holds the info; nothing scrolls.
+   Narrow screens: the game on top, the column below. */
+#app{display:flex;flex-direction:column;min-height:100vh}
+#stage{padding:8px;display:flex;justify-content:center;align-items:center}
+#fsbox{position:relative;width:100%;aspect-ratio:4/3;background:#000}
 #gamebox{position:absolute;inset:0;overflow:hidden}
 #game{width:100%;height:100%;position:relative}
+#side{padding:10px 12px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+#side .panel{margin:0;padding:10px}
+#head{display:flex;gap:8px;align-items:center;justify-content:space-between}
+#head a{font-size:13px;text-decoration:none}
+#title{font-size:17px;line-height:1.25;margin:0;overflow-wrap:anywhere}
+#status{white-space:pre-line;font-size:13px}#status:empty{display:none}
+#peers{margin-top:6px;font-size:13px}#peers:empty{display:none}
+.peer{display:flex;gap:10px;align-items:baseline}.peer b{min-width:2ch}.peer span{white-space:nowrap}
+.warn{color:var(--warn)}.bad{color:#ff5d5d}
+#stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:13px}
+.pick{display:flex;gap:8px}.pick label{flex:1;display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mut);min-width:0}
+.pick select{padding:6px;width:100%;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:8px}
+#switch{font-size:13px}
+#helpbox summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
 /* Fullscreen goes to #fsbox (not #game), so the CRT layer and the ping badge stay on top; the picture keeps 4:3. */
-#fsbox:fullscreen{width:100%;height:100%;margin:0;display:flex;align-items:center;justify-content:center}
+#fsbox:fullscreen{width:100%;height:100%;aspect-ratio:auto;margin:0;display:flex;align-items:center;justify-content:center}
 #fsbox:fullscreen #gamebox{position:relative;inset:auto;width:min(100vw,calc(100vh*4/3));height:min(100vh,calc(100vw*3/4))}
-select{padding:8px}#status{white-space:pre-line}
+@media (min-width:900px){
+  body{height:100vh;height:100dvh;overflow:hidden}
+  #app{flex-direction:row;height:100%;min-height:0}
+  #stage{flex:1;min-width:0;min-height:0;padding:8px}
+  #fsbox{width:min(100%,calc((100vh - 16px) * 4 / 3));width:min(100%,calc((100dvh - 16px) * 4 / 3))}
+  #side{width:clamp(320px,26vw,400px);flex:none;overflow-y:auto;border-left:1px solid var(--line)}
+}
 </style>
 <script src="/webrtc.js"></script>
 <script src="/pads.js"></script>
@@ -21,25 +45,31 @@ select{padding:8px}#status{white-space:pre-line}
 <script src="/hud.js"></script>
 </head>
 <body>
-<header><h1><a href="/">← RemoteGame</a></h1><span id="title"></span><span id="mode" class="pill p1"></span><span id="pad" class="mut"></span></header>
-<main>
-  <div class="panel row"><label>Emulador <select id="core"></select></label><button class="copy" id="launch">Abrir</button><a class="copy" id="switch" style="text-decoration:none"></a><button class="copy" id="crt"></button></div>
-  <div class="panel" id="online" style="display:none">
-    <div id="status">Conectando…</div>
-    <div id="links" class="kbd"></div>
-  </div>
-  <div class="panel" id="localStatus" style="display:none"></div>
+<div id="app">
   <!-- CRT layer sits over #game, outside the canvas the friend's stream is captured from -->
-  <div id="fsbox"><div id="gamebox"><div id="game"></div></div></div>
-  <div class="panel kbd" id="help"></div>
-</main>
+  <div id="stage"><div id="fsbox"><div id="gamebox"><div id="game"></div></div></div></div>
+  <aside id="side">
+    <div id="head"><a href="/">← RemoteGame</a><span id="mode" class="pill p1"></span></div>
+    <h1 id="title"></h1>
+    <div class="panel" id="online" style="display:none">
+      <div id="links"></div>
+      <div id="peers"></div>
+      <div id="status">Conectando…</div>
+    </div>
+    <div class="panel" id="localStatus" style="display:none"></div>
+    <div id="stats"><span id="efps" title="Cuadros por segundo del emulador en esta PC"></span><span id="pad" class="mut"></span></div>
+    <div class="pick"><label id="coreBox">Emulador<select id="core"></select></label><label>Pantalla<select id="crt"></select></label></div>
+    <a id="switch"></a>
+    <details id="helpbox"><summary>Controles</summary><div class="kbd" id="help"></div></details>
+  </aside>
+</div>
 <script>
 (async function(){
   const qs=new URLSearchParams(location.search), system=qs.get('system')||'genesis', file=qs.get('file')||'';
   // Online by default: the friend's link follows whatever game is open here.
   const online=qs.get('local')!=='1';
   const defaults={nes:'nes',genesis:'segaMD',arcade:'fbneo',snes:'snes',n64:'n64'};
-  const choices={nes:'NES / Family',snes:'Super Nintendo',segaMD:'Genesis',n64:'Nintendo 64',fbneo:'Arcade / Neo Geo (FBNeo)',mame2003:'MAME 2003'};
+  const choices={nes:'NES / Family',snes:'Super Nintendo',segaMD:'Genesis',n64:'Nintendo 64',fbneo:'Arcade / Neo Geo (FBNeo)',mame2003_plus:'MAME 2003-Plus',mame2003:'MAME 2003'};
   const $=id=>document.getElementById(id);
   const status=online?$('status'):$('localStatus');
   if(online)$('online').style.display='';else status.style.display='';
@@ -48,31 +78,37 @@ select{padding:8px}#status{white-space:pre-line}
   try {
     if(!file)throw new Error('Falta el juego. Volvé al inicio.');
     let core=qs.get('core')||defaults[system]||(/\.nes$/i.test(file)?'nes':/\.(bin|md|smd|gen)$/i.test(file)?'segaMD':null);
-    const allowed=system==='subidos'?Object.keys(choices):system==='arcade'?['fbneo','mame2003']:[defaults[system]];
+    const allowed=system==='subidos'?Object.keys(choices):system==='arcade'?['fbneo','mame2003_plus','mame2003']:[defaults[system]];
     if(core&&!allowed.includes(core))throw new Error('Ese emulador no sirve para este sistema.');
     const select=$('core');
     allowed.filter(Boolean).forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=choices[value];select.appendChild(option);});
     if(core)select.value=core;
+    else{const o=document.createElement('option');o.value='';o.textContent='Elegí…';select.prepend(o);select.value='';}
     // Never show the raw file name: a tidy one now, the real title as soon as the server answers.
     const setTitle=name=>{$('title').textContent=name;document.title=name+' · RemoteGame';};
     window.setGameTitle=setTitle;
     setTitle(file.replace(/\.[^.]+$/,'').replace(/\s*\[[^\]]*\]/g,'').replace(/\s*\([^)]*\)/g,'').trim()||file);
-    fetch('/api/game/'+encodeURIComponent(system)+'/'+encodeURIComponent(file)).then(r=>r.ok?r.json():null).then(g=>{if(g&&g.name)setTitle(g.name);}).catch(()=>{});
-    $('mode').textContent=online?'Online · vos sos P1':'2P en esta PC';
-    $('launch').onclick=()=>{qs.set('core',select.value);location.search=qs.toString();};
+    fetch('/api/game/'+encodeURIComponent(system)+'/'+encodeURIComponent(file)).then(r=>r.ok?r.json():null).then(g=>{
+      if(g&&g.name)setTitle(g.name);
+      // An arcade ZIP no core can run (see /api/game): say why before it fails with an emulator error.
+      if(g&&g.compat===false){const n=document.createElement('div');n.className='panel';n.style.cssText='color:var(--warn);font-size:13px';n.textContent='⚠ Este juego probablemente no ande: '+g.reason+'. Probamos igual.';$('title').after(n);}
+    }).catch(()=>{});
+    $('mode').textContent=online?'Online · vos sos P1':'Local · hasta 4 mandos';
+    select.onchange=()=>{qs.set('core',select.value);location.search=qs.toString();};
+    if(allowed.filter(Boolean).length<2)$('coreBox').style.display='none';
     const other=new URL(location.href);other.searchParams.delete('online');if(online)other.searchParams.set('local','1');else other.searchParams.delete('local');
-    $('switch').href=other;$('switch').textContent=online?'Jugar 2P en esta PC':'Volver a online';
-    $('help').innerHTML=online
-      ?'<b>Tus controles (P1):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda.<br>'
-       +'<b>Tu amigo (P2)</b> usa siempre el mismo link: ve el juego que abrís acá y cambia solo cuando abrís otro. No instala nada.<br>'
-       +'Dejá esta pestaña visible: si la minimizás, el juego se frena para los dos.'
+    $('switch').href=other;$('switch').textContent=online?'Jugar en esta PC (hasta 4 mandos)':'← Volver a online';
+    const pads='Los botones del mando: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D). Si no aparece tu mando, apretá un botón con esta pestaña enfocada.';
+    $('help').innerHTML=(online
+      ?'<b>Tus controles (P1):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda.'
       :'<b>P1:</b> mando 1, o teclado <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · <kbd>F</kbd> <kbd>G</kbd> <kbd>R</kbd> <kbd>T</kbd> botones · <kbd>Q</kbd> <kbd>E</kbd> gatillos · <kbd>1</kbd> Select/Moneda · <kbd>2</kbd> Start.<br>'
        +'<b>P2:</b> mando 2, o teclado <kbd>←↑↓→</kbd> · <kbd>K</kbd> <kbd>L</kbd> <kbd>I</kbd> <kbd>O</kbd> botones · <kbd>U</kbd> <kbd>P</kbd> gatillos · <kbd>Backspace</kbd> Select/Moneda · <kbd>Enter</kbd> Start.<br>'
-       +'Mandos: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D).';
-    if(core==='n64')$('help').innerHTML+='<br>N64: stick con <kbd>T</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd> y botones C con <kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> (solo P1); P2 solo con mando.';
-    $('help').innerHTML+='<br>Si tu mando no aparece arriba, apretá un botón con esta pestaña enfocada (el navegador lo oculta hasta entonces). Con Steam abierto, un mando de PlayStation se ve como uno de Xbox: es normal.';
-    if(!core){status.textContent='Elegí el emulador que corresponde a este ZIP y tocá Abrir.';return;}
-    RemoteCRT.attach($('gamebox'),$('crt')).setCore(core);
+       +'<b>P3 y P4:</b> solo con mando (el 3 y el 4).')
+      +(core==='n64'?'<br>N64: stick con <kbd>T</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd> y botones C con <kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> (solo P1); los demás, solo con mando.':'')
+      +'<br>'+players(core)+'<br>'+pads+(online?'<br>Dejá esta pestaña visible: si la minimizás, el juego se frena para todos.':'');
+    const crt=RemoteCRT.attach($('gamebox'),$('crt'));
+    if(!core){status.textContent='Elegí el emulador que corresponde a este ZIP.';return;}
+    crt.setCore(core);
 
     // The keyboard and pads are read here, not by EmulatorJS (see pads.js), so it gets blank bindings.
     window.EJS_player='#game';window.EJS_gameName=file;window.EJS_core=core;
@@ -94,7 +130,8 @@ select{padding:8px}#status{white-space:pre-line}
     });
     setupFullscreen();
     setupInput(core);
-    if(core==='fbneo'||core==='mame2003') {
+    {let n0=0,t0=performance.now();setInterval(()=>{try{const n=EJS_emulator.gameManager.getFrameNum(),t=performance.now();if(started&&n0>0&&n>=n0)$('efps').textContent='🕹 '+Math.round((n-n0)*1000/(t-t0))+' fps';n0=n;t0=t;}catch(e){}},1000);}
+    if(core==='fbneo'||core==='mame2003'||core==='mame2003_plus') {
       const response=await fetch('/api/arcade-bios');if(!response.ok)throw new Error('No se pudo consultar los BIOS.');
       const bios=await response.json();
       // FBNeo needs neogeo.zip still zipped, next to the ROM.
@@ -104,12 +141,21 @@ select{padding:8px}#status{white-space:pre-line}
     let h=2166136261;for(const char of system+'|'+core+'|'+file){h^=char.charCodeAt(0);h=Math.imul(h,16777619);}
     window.EJS_gameID=h>>>0;
     if(online)await startHost(system,file,core,status);
-    else status.textContent='Tocá Start Game para jugar. El mando 1 es P1 y el 2 es P2.';
+    else status.textContent='Tocá Start Game para jugar. Cada mando es un jugador: el 1 es P1, el 2 es P2… hasta el 4.';
     const loader=document.createElement('script');loader.src=window.EJS_pathtodata+'loader.js';
     loader.onerror=()=>{status.textContent='No se pudo cargar EmulatorJS. Revisá tu conexión a Internet.';};
     document.body.appendChild(loader);
   } catch(error){status.textContent=error.message;}
 
+  // What each core needs for P3/P4 (checked against the core docs; EmulatorJS 4.2.3 cannot pick controller devices).
+  function players(core){
+    if(core==='fbneo'||core==='mame2003'||core==='mame2003_plus')return '<b>P3 y P4:</b> andan directo en los arcades de 4 jugadores (en muchos hay que poner una moneda por jugador).';
+    if(core==='n64')return '<b>P3 y P4:</b> el Nintendo 64 tiene 4 mandos de fábrica: andan en todos los juegos que los usan.';
+    if(core==='nes')return '<b>P3 y P4:</b> casi no andan: el Four Score solo se activa en unas pocas ROMs originales, y los juegos traducidos o modificados no entran.';
+    if(core==='snes')return '<b>P3 y P4:</b> no andan: el multitap hay que activarlo en el emulador y esta versión de EmulatorJS no lo permite.';
+    if(core==='segaMD')return '<b>P3 y P4:</b> solo en los juegos con cartucho J-Cart (Micro Machines Turbo Tournament 96); los de 4-Way Play o Team Player (NBA Jam…) no andan: esta versión de EmulatorJS no permite activarlos.';
+    return '<b>P3 y P4:</b> dependen del juego y del emulador.';
+  }
   // EmulatorJS puts its own player element in fullscreen, which leaves the CRT layer and the ping
   // badge outside. Send the fullscreen to the wrapper and tell EmulatorJS (it swaps its icon on this event).
   function setupFullscreen(){
@@ -146,24 +192,28 @@ select{padding:8px}#status{white-space:pre-line}
     show();
   }
 
-  // Online: this tab emulates and streams video+audio; the guest sends only its controls.
+  // Online: this tab emulates and streams video+audio to up to 3 guests (P2-P4, seats 0-2);
+  // each guest sends only its controls, which go to EmulatorJS player seat+1 (P1 is player 0).
   async function startHost(system,file,core,status){
-    const REMOTE_PLAYER=1;
-    let video=null, audio=null, scale=1, rtc=null, remote=RemotePads.EMPTY, lastSeq=-1, ws=null, replaced=false;
+    let video=null, audio=null, scale=1, ws=null, replaced=false, note='';
+    const guests=new Map(); // seat -> { rtc, lastSeq, remote, open, ms, fps, sent }
     const ping=RemoteHUD.ping($('fsbox'));
     RemoteShare.banner($('links'));
     const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
+    const label=seat=>'P'+(seat+2), names=seats=>seats.map(label).join(', ');
 
     // Tap every connection to the speakers so the game audio can be streamed as well.
     const connect=AudioNode.prototype.connect;
     AudioNode.prototype.connect=function(target,...rest){
       if(target instanceof AudioDestinationNode){
         const ctx=target.context;
-        if(!ctx.remoteTap){ctx.remoteTap=ctx.createMediaStreamDestination();audio=ctx.remoteTap.stream.getAudioTracks()[0];rtc&&rtc.setTracks(video,audio,scale);}
+        if(!ctx.remoteTap){ctx.remoteTap=ctx.createMediaStreamDestination();audio=ctx.remoteTap.stream.getAudioTracks()[0];setTracks();}
         connect.call(this,ctx.remoteTap);
       }
       return connect.call(this,target,...rest);
     };
+    // The same video and audio tracks feed every guest's connection (each one encodes on its own).
+    const setTracks=()=>{for(const g of guests.values())g.rtc.setTracks(video,audio,scale);};
     startHooks.push(()=>{
       const canvas=window.EJS_emulator&&EJS_emulator.canvas;
       if(canvas&&canvas.captureStream){
@@ -171,47 +221,91 @@ select{padding:8px}#status{white-space:pre-line}
         video=canvas.captureStream().getVideoTracks()[0];
         // The canvas is the game upscaled (e.g. 960x720 for 320x240): send the native size.
         scale=Math.max(1,Math.floor(canvas.height/(core==='n64'?480:240)));
-        rtc&&rtc.setTracks(video,audio,scale);
+        setTracks();
       }
       else status.textContent='Este navegador no puede transmitir el juego.';
     });
 
-    const simulate=(index,value)=>{try{EJS_emulator.gameManager.simulateInput(REMOTE_PLAYER,index,value);}catch(e){}};
-    const releaseRemote=()=>{RemotePads.applyGuest(remote,RemotePads.EMPTY,simulate);remote=RemotePads.EMPTY;};
+    // What the host sees: who is still connecting and the last thing that happened (who is in, with
+    // their ping and fps, is the list above; the banner counts them).
+    function refresh(next){
+      if(next!==undefined)note=next;
+      const wait=[...guests.keys()].sort().filter(s=>!guests.get(s).open);
+      const lines=[];
+      if(note)lines.push(note);
+      if(wait.length)lines.push(names(wait)+(wait.length>1?' entraron':' entró')+', conectando video…');
+      status.textContent=lines.join('\n');
+      drawPeers();
+    }
+    // One row per connected guest: ping (coloured by quality) and the fps that reaches them.
+    function drawPeers(){
+      const box=$('peers');box.textContent='';
+      for(const seat of [...guests.keys()].sort()){
+        const g=guests.get(seat);if(!g.open)continue;
+        const row=document.createElement('div');row.className='peer';
+        const who=document.createElement('b');who.textContent=label(seat);
+        const ms=document.createElement('span');ms.textContent=g.ms==null?'… ms':Math.round(g.ms)+' ms';if(g.ms!=null)ms.className=RemoteHUD.quality(g.ms);
+        const fps=document.createElement('span');fps.className='mut';fps.title='Cuadros por segundo que le llegan';fps.textContent=g.fps==null?'… fps':Math.round(g.fps)+' fps';
+        row.append(who,ms,fps);box.append(row);
+      }
+    }
+    // Video frames sent to each guest in the last second, from its own connection's stats.
+    setInterval(()=>{
+      for(const g of guests.values()){
+        if(!g.open||!g.rtc.pc)continue;
+        g.rtc.pc.getStats().then(report=>{
+          report.forEach(r=>{
+            if(r.type!=='outbound-rtp'||r.kind!=='video')return;
+            const now=performance.now();
+            if(g.sent)g.fps=(r.framesSent-g.sent.n)*1000/(now-g.sent.t);
+            g.sent={n:r.framesSent,t:now};
+          });
+          drawPeers();
+        }).catch(()=>{});
+      }
+    },1000);
     const wsSend=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
+    const simulate=seat=>(index,value)=>{try{EJS_emulator.gameManager.simulateInput(seat+1,index,value);}catch(e){}};
+    const release=(seat,g)=>{RemotePads.applyGuest(g.remote,RemotePads.EMPTY,simulate(seat));g.remote=RemotePads.EMPTY;};
+    function closeGuest(seat){
+      const g=guests.get(seat);
+      if(!g)return;
+      g.rtc.close();release(seat,g);guests.delete(seat);ping.hide(label(seat));
+    }
 
-    function startRtc(){
-      if(rtc)rtc.close();
-      lastSeq=-1;
-      rtc=new RemoteWebRTC({
+    function startRtc(seat){
+      closeGuest(seat);
+      const g={rtc:null,lastSeq:-1,remote:RemotePads.EMPTY,open:false,ms:null,fps:null,sent:null};
+      guests.set(seat,g);
+      g.rtc=new RemoteWebRTC({
         isHost:true,media:true,iceServers,
-        sendSignal:data=>wsSend({t:'signal',data}),
-        onOpen:()=>{status.textContent='✅ Video y controles conectados con tu amigo.';},
-        onClose:()=>{releaseRemote();ping.hide();},
-        onPing:rtt=>ping.set(rtt),
+        sendSignal:data=>wsSend({t:'signal',to:seat,data}),
+        onOpen:()=>{g.open=true;refresh('');},
+        onClose:()=>{g.open=false;release(seat,g);ping.hide(label(seat));drawPeers();},
+        onPing:rtt=>{g.ms=rtt;ping.set(rtt,label(seat));drawPeers();},
         onMessage:m=>{
-          if(!m||m.t!=='pad'||!Number.isInteger(m.s)||m.s<=lastSeq)return;
-          lastSeq=m.s;
+          if(!m||m.t!=='pad'||!Number.isInteger(m.s)||m.s<=g.lastSeq)return;
+          g.lastSeq=m.s;
           const next={b:(m.b|0)&0xffff,x:Math.max(-127,Math.min(127,m.x|0)),y:Math.max(-127,Math.min(127,m.y|0))};
-          RemotePads.applyGuest(remote,next,simulate);remote=next;
+          RemotePads.applyGuest(g.remote,next,simulate(seat));g.remote=next;
         }
       });
-      rtc.start().then(()=>rtc.setTracks(video,audio,scale));
+      g.rtc.start().then(()=>g.rtc.setTracks(video,audio,scale));
     }
 
     await new Promise((resolve,reject)=>{
       ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-      // One permanent room: opening this game makes it the one the guest sees.
+      // One permanent room: opening this game makes it the one the guests see.
       ws.onopen=()=>{wsSend({t:'host',system,rom:file,core});resolve();};
       ws.onerror=()=>reject(new Error('No se pudo conectar con el servidor.'));
       ws.onclose=()=>{if(!replaced)status.textContent='⚠️ Se perdió la conexión con el servidor. Recargá la página.';};
       ws.onmessage=ev=>{
         let m;try{m=JSON.parse(ev.data);}catch{return;}
-        if(m.t==='hosting'){if(m.name)window.setGameTitle(m.name);status.textContent=m.guest?'Tu amigo ya está en la sala. Tocá Start Game para empezar.':'Tocá Start Game para empezar. Tu amigo ve este juego apenas entre al link.';}
-        else if(m.t==='peer'){status.textContent='Tu amigo entró. Conectando el video…';startRtc();}
-        else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
-        else if(m.t==='peer-left'){if(rtc){rtc.close();rtc=null;}releaseRemote();ping.hide();status.textContent='Tu amigo salió. Puede volver a entrar con el mismo link.';}
-        else if(m.t==='replaced'){replaced=true;if(rtc){rtc.close();rtc=null;}releaseRemote();ping.hide();status.textContent='Abriste otro juego en otra pestaña y tu amigo ahora ve ese. Cerrá esta pestaña.';}
+        if(m.t==='hosting'){if(m.name)window.setGameTitle(m.name);refresh('Tocá Start Game para empezar.');}
+        else if(m.t==='peer'&&Number.isInteger(m.slot)){note='';startRtc(m.slot);refresh();}
+        else if(m.t==='signal'){const g=guests.get(m.from);g&&g.rtc.handleSignal(m.data);}
+        else if(m.t==='peer-left'&&Number.isInteger(m.slot)){closeGuest(m.slot);refresh(label(m.slot)+' salió. Puede volver con el mismo link.');}
+        else if(m.t==='replaced'){replaced=true;for(const seat of [...guests.keys()])closeGuest(seat);status.textContent='Abriste otro juego en otra pestaña y tus amigos ahora ven ese. Cerrá esta pestaña.';}
         else if(m.t==='error'){status.textContent='❌ '+m.msg;}
       };
     });

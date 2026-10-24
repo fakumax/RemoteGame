@@ -6,12 +6,35 @@
 <title>RemoteGame · Jugar online</title>
 <link rel="stylesheet" href="/style.css">
 <style>
-#wrap{position:relative;width:min(960px,100%);aspect-ratio:4/3;margin:12px auto;background:#000;border-radius:8px;overflow:hidden}
-#wrap:fullscreen{border-radius:0}
+/* Desktop (mouse): the video takes the height of the window (4:3), a narrow column holds the info and
+   nothing scrolls. Phones and tablets: video on top, touch pad, then the column. */
+#app{display:flex;flex-direction:column;min-height:100vh}
+#stage{padding:8px}
+#wrap{position:relative;width:100%;max-width:960px;aspect-ratio:4/3;margin:0 auto;background:#000;border-radius:8px;overflow:hidden}
+#wrap:fullscreen{border-radius:0;max-width:none;aspect-ratio:auto}
 #frame{position:relative;height:100%;aspect-ratio:4/3;max-width:100%;margin:0 auto}
 #screen{width:100%;height:100%;object-fit:contain;display:block;image-rendering:pixelated}
 #enter{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);color:#fff;font-size:20px;font-weight:700;border:0;cursor:pointer;width:100%}
-#status{white-space:pre-line}
+#side{padding:10px 12px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+#side .panel{margin:0;padding:10px}
+#brand{font-size:13px;color:var(--mut)}
+#head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#title{font-size:17px;font-weight:700;line-height:1.25;overflow-wrap:anywhere}
+#status{white-space:pre-line;font-size:13px}
+#stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:13px}
+.pick select{padding:6px;width:100%;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:8px}
+.pick label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mut)}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+#side details summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
+@media (max-width:420px){#touch{zoom:.88}}
+.p3{background:#103a22;color:#7fe0a6}.p4{background:#3a1030;color:#f0a0dc}
+@media (min-width:900px) and (pointer:fine){
+  body{height:100vh;height:100dvh;overflow:hidden}
+  #app{flex-direction:row;height:100%;min-height:0}
+  #stage{flex:1;min-width:0;min-height:0;display:flex;justify-content:center;align-items:center}
+  #wrap{width:min(100%,calc((100vh - 16px) * 4 / 3));width:min(100%,calc((100dvh - 16px) * 4 / 3));max-width:none;margin:0}
+  #side{width:clamp(300px,24vw,360px);flex:none;overflow-y:auto;border-left:1px solid var(--line)}
+}
 /* Touch pad, only on phones/tablets */
 #touch{display:none;touch-action:none;user-select:none;-webkit-user-select:none;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin:8px auto;max-width:960px}
 body.touch #touch{display:grid}
@@ -27,9 +50,10 @@ body.touch #touch{display:grid}
 #shoulders button{width:90px;padding:10px;border-radius:10px}
 /* Phone in landscape: video fills the screen and the pad floats over it */
 @media (orientation:landscape) and (max-height:520px){
-  body.touch header,body.touch .panel{display:none}
-  body.touch main{padding:0;max-width:none}
-  body.touch #wrap{position:fixed;inset:0;width:100vw;height:100vh;margin:0;border-radius:0;aspect-ratio:auto}
+  body.touch #side{display:none}
+  body.touch #app{display:block}
+  body.touch #stage{padding:0}
+  body.touch #wrap{position:fixed;inset:0;width:100vw;height:100vh;max-width:none;margin:0;border-radius:0;aspect-ratio:auto}
   body.touch #touch{position:fixed;inset:0;margin:0;max-width:none;padding:12px 18px;align-items:end;pointer-events:none}
   body.touch #touch>*{pointer-events:auto}
   body.touch #shoulders{position:fixed;top:10px;left:18px;right:18px}
@@ -42,9 +66,8 @@ body.touch #touch{display:grid}
 <script src="/hud.js"></script>
 </head>
 <body>
-<header><h1>🎮 RemoteGame</h1><span id="title"></span><span class="pill p2">P2 · invitado</span><span id="pad" class="mut"></span><span id="net" class="mut"></span><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="crt"></button><button class="copy" id="full">Pantalla completa</button></header>
-<main>
-  <div class="panel" id="status">Conectando…</div>
+<div id="app">
+<div id="stage">
   <div id="wrap"><div id="frame"><video id="screen" autoplay playsinline muted></video></div><button id="enter">▶ Tocá para entrar con sonido</button></div>
   <div id="touch">
     <div id="shoulders"><button data-code="KeyQ">L</button><button data-code="KeyW">R</button></div>
@@ -57,12 +80,20 @@ body.touch #touch{display:grid}
       <button data-code="KeyZ" data-label="b" style="left:55px;top:110px">B</button>
     </div>
   </div>
-  <div class="panel kbd" id="help">
-    <b>Tus controles (P2):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
-    Mandos: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D). El juego corre en la PC del anfitrión: acá solo llega el video.<br>
-    Si tu mando no aparece arriba, apretá un botón con esta pestaña enfocada (el navegador lo oculta hasta entonces). Con Steam abierto, un mando de PlayStation se ve como uno de Xbox: es normal.
-  </div>
-</main>
+</div>
+<aside id="side">
+  <div id="head"><span class="pill p2" id="me">Invitado</span><span id="brand">🎮 RemoteGame</span></div>
+  <div id="title"></div>
+  <div class="panel" id="status">Conectando…</div>
+  <div id="stats"><span id="net" class="mut"></span><span id="pad" class="mut"></span></div>
+  <div class="pick"><label>Pantalla<select id="crt"></select></label></div>
+  <div class="btns"><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="full">Pantalla completa</button></div>
+  <details><summary>Controles</summary><div class="kbd" id="help">
+    <b>Tus controles (<span id="who">invitado</span>):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
+    Mando: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D). Si no aparece, apretá un botón con esta pestaña enfocada.
+  </div></details>
+</aside>
+</div>
 <script>
 (async function(){
   const $=id=>document.getElementById(id);
@@ -80,7 +111,7 @@ body.touch #touch{display:grid}
   const track=RemotePads.padTracker();
   let live=[];
   const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
-  let ws=null, rtc=null, analog=false, seq=0, last=null, lastSent=0, keys={};
+  let ws=null, rtc=null, player=0, roomFull=false, analog=false, seq=0, last=null, lastSent=0, keys={};
 
   const GAME_KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','ShiftLeft','ShiftRight','KeyZ','KeyX','KeyA','KeyS','KeyQ','KeyW'];
   // The arrows and Space must never scroll the page, wherever the focus is.
@@ -167,11 +198,10 @@ body.touch #touch{display:grid}
       if(s.type==='inbound-rtp'&&s.kind==='video'){fps=s.framesPerSecond;if(s.jitterBufferEmittedCount)buffer=1000*s.jitterBufferDelay/s.jitterBufferEmittedCount;}
     });
     const parts=[];
-    if(rtt!=null)ping.set(rtt*1000);else ping.hide();
-    if(buffer!=null)parts.push('buffer '+Math.round(buffer)+' ms');
+    if(rtt!=null){ping.set(rtt*1000);parts.push(Math.round(rtt*1000)+' ms');}else ping.hide();
     if(fps!=null)parts.push(Math.round(fps)+' fps');
-    if(path)parts.push(path==='directo'?'conexión directa':'conexión por TURN');
-    $('net').textContent=parts.join(' · ');
+    if(path)parts.push(path==='directo'?'directo':'por TURN');
+    $('net').textContent=parts.join(' · ');$('net').title=buffer!=null?'Buffer de recepción: '+Math.round(buffer)+' ms':'';
   }
   setInterval(stats,1000);
 
@@ -188,7 +218,7 @@ body.touch #touch{display:grid}
       isHost:false,iceServers,
       sendSignal:data=>send({t:'signal',data}),
       onTrack:track=>{media.addTrack(track);video.play().catch(()=>{});},
-      onOpen:()=>{clearTimeout(natTimer);setStatus('✅ Conectado. Jugás como P2.');seq=0;last=null;poll();},
+      onOpen:()=>{clearTimeout(natTimer);setStatus('✅ Conectado. Jugás como P'+player+'.');seq=0;last=null;poll();},
       onClose:()=>{ping.hide();if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');},
       // The route under the call died (e.g. 4G dropped): rebuild it instead of waiting.
       onState:state=>{
@@ -202,6 +232,20 @@ body.touch #touch{display:grid}
     natTimer=setTimeout(()=>{if(rtc&&!rtc.isOpen())setStatus('No se pudo conectar directo con el anfitrión (la red de alguno de los dos lo impide).\nHace falta un servidor TURN: el anfitrión lo configura con TURN_URLS en el servidor.');},15000);
   }
 
+  // A stable id is the seat: a reload or a network switch comes back as the same player (P2-P4).
+  // If storage is blocked, one per page load: the seat is kept while this tab stays open.
+  const guestId=(()=>{
+    const fresh=()=>(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+Date.now().toString(36));
+    try {
+      let id=localStorage.getItem('remotegame-guest');
+      if(!/^[\w-]{1,64}$/.test(id||'')){id=fresh();localStorage.setItem('remotegame-guest',id);}
+      return id;
+    } catch(e){ return fresh(); }
+  })();
+  function setPlayer(n){
+    player=n;
+    $('me').textContent='P'+n+' · invitado';$('me').className='pill p'+n;$('who').textContent='P'+n;
+  }
   // Permanent room: stay connected and follow whatever game the host opens.
   let replaced=false, dropTimer=null, retryTimer=null, lastReconnect=0;
   const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
@@ -211,9 +255,11 @@ body.touch #touch{display:grid}
     if(ws){const old=ws;ws=null;try{old.close();}catch(e){}}
     const socket=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
     ws=socket;
-    socket.onopen=()=>send({t:'guest'});
+    socket.onopen=()=>send({t:'guest',id:guestId});
     socket.onclose=()=>{
       if(replaced||ws!==socket)return;
+      // Room full: look again now and then, a seat may free up.
+      if(roomFull){retryTimer=setTimeout(connect,5000);return;}
       if(!rtc||!rtc.isOpen())setStatus('Reconectando con el servidor…');
       retryTimer=setTimeout(connect,2000);
     };
@@ -221,12 +267,15 @@ body.touch #touch{display:grid}
       if(ws!==socket)return;
       let m;try{m=JSON.parse(ev.data);}catch{return;}
       if(m.t==='game'){
+        roomFull=false;
+        if(m.player)setPlayer(m.player);
         if(!m.game){stopRtc();$('title').textContent='';setStatus('Esperando que el anfitrión abra un juego…');return;}
         analog=m.game.core==='n64';$('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core);crt.setCore(m.game.core);
         setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
       } else if(m.t==='host-left'){stopRtc();setStatus('El anfitrión está cambiando de juego…');}
       else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
       else if(m.t==='replaced'){replaced=true;stopRtc();setStatus('Abriste la sala en otra pestaña o dispositivo. Seguí jugando ahí.');}
+      else if(m.t==='full'){roomFull=true;stopRtc();setStatus('La sala está llena: ya hay 4 jugadores.\nSi alguien se va, entrás solo; probamos de nuevo cada pocos segundos.');socket.close();}
       else if(m.t==='error'){setStatus('❌ '+m.msg);}
     };
   }

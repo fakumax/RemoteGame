@@ -1,6 +1,6 @@
-// RemoteGame: biblioteca local de solo lectura y netplay NES 2P
-// La carpeta GAMES LAUNCHBOX EMULATOR se usa SIEMPRE en modo SOLO LECTURA.
-// Lo unico que se escribe es ./roms (subidas desde la web).
+// RemoteGame: biblioteca local y netplay NES 2P
+// En la carpeta de juegos las ROMs nunca se tocan: lo unico que se escribe ahi son las portadas,
+// en <consola>/covers/. Fuera de ella se escribe ./roms (subidas desde la web), ./cache y settings.json.
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -16,9 +16,24 @@ try {
   cfg = Object.assign(cfg, JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')));
 } catch (e) { /* config opcional */ }
 
+// Fingerprint of the code that is running. A newer launch compares it with the one holding the
+// port to know whether to replace it. REMOTEGAME_BUILD_SALT lets a test fake a different version.
+const BUILD = (() => {
+  const hash = crypto.createHash('sha1');
+  const files = ['server.js', 'package.json'];
+  try { files.push(...fs.readdirSync(path.join(__dirname, 'netplay-node')).filter(f => f.endsWith('.js')).sort().map(f => 'netplay-node/' + f)); } catch (e) {}
+  for (const f of files) { try { hash.update(f).update(fs.readFileSync(path.join(__dirname, f))); } catch (e) {} }
+  return hash.update(process.env.REMOTEGAME_BUILD_SALT || '').digest('hex').slice(0, 12);
+})();
+
 function createRemoteGame(options = {}) {
 const PORT = options.port ?? (process.env.PORT ? Number(process.env.PORT) : cfg.port);
-const GAMES_ROOT = path.resolve(options.gamesRoot || process.env.GAMES_ROOT || path.join(os.homedir(), 'Desktop', 'GAMES LAUNCHBOX EMULATOR'));
+// The games folder, in order of priority: option / GAMES_ROOT variable, settings.json (git-ignored,
+// written from the library page), then the default. The first two cannot be changed from the page.
+const SETTINGS_FILE = path.resolve(options.settingsFile || path.join(__dirname, 'settings.json'));
+const readSettings = () => { try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) || {}; } catch (e) { return {}; } };
+const ROOT_LOCKED = !!(options.gamesRoot || process.env.GAMES_ROOT);
+let GAMES_ROOT = path.resolve(options.gamesRoot || process.env.GAMES_ROOT || readSettings().gamesRoot || path.join(os.homedir(), 'Desktop', 'GAMES LAUNCHBOX EMULATOR'));
 const LOCAL_ROMS = path.resolve(options.localRoms || path.join(__dirname, 'roms'));
 const LAUNCHBOX = path.resolve(options.launchBoxDir || process.env.LAUNCHBOX_DIR || path.join(os.homedir(), 'LaunchBox'));
 fs.mkdirSync(LOCAL_ROMS, { recursive: true });
@@ -26,13 +41,59 @@ const game = { publicUrl: null };
 
 // Sistemas. dir de GAMES = lectura. Solo 'subidos' permite escritura.
 const SYSTEMS = {
-  nes:     { label: 'NES / Family', dir: path.join(GAMES_ROOT, 'NES'), exts: ['.nes', '.zip'], ejs: 'nes', lb: 'Nintendo Entertainment System' },
-  genesis: { label: 'Sega Genesis', dir: path.join(GAMES_ROOT, 'Sega Genesis'), exts: ['.bin', '.md', '.smd', '.gen', '.zip'], ejs: 'segaMD', lb: 'Sega Genesis' },
-  arcade:  { label: 'Arcade / Neo Geo', dir: path.join(GAMES_ROOT, 'MAME', 'Roms'), exts: ['.zip'], ejs: 'fbneo', lb: 'Arcade' },
-  snes: { label: 'Super Nintendo', dir: path.join(GAMES_ROOT, 'Super Nintendo', 'Roms'), exts: ['.sfc', '.smc', '.zip'], ejs: 'snes', lb: 'Super Nintendo Entertainment System' },
-  n64: { label: 'Nintendo 64', dir: path.join(GAMES_ROOT, 'Nintendo 64', 'Roms'), exts: ['.z64', '.n64', '.v64', '.zip'], ejs: 'n64', lb: 'Nintendo 64' },
+  nes:     { label: 'NES / Family', dir: path.join(GAMES_ROOT, 'NES'), exts: ['.nes', '.zip'], ejs: 'nes', lb: 'Nintendo Entertainment System', lr: ['Nintendo - Nintendo Entertainment System'] },
+  genesis: { label: 'Sega Genesis', dir: path.join(GAMES_ROOT, 'Sega Genesis'), exts: ['.bin', '.md', '.smd', '.gen', '.zip'], ejs: 'segaMD', lb: 'Sega Genesis', lr: ['Sega - Mega Drive - Genesis'] },
+  arcade:  { label: 'Arcade / Neo Geo', dir: path.join(GAMES_ROOT, 'MAME', 'Roms'), exts: ['.zip'], ejs: 'fbneo', lb: 'Arcade', lr: ['FBNeo - Arcade Games', 'MAME'] },
+  snes: { label: 'Super Nintendo', dir: path.join(GAMES_ROOT, 'Super Nintendo', 'Roms'), exts: ['.sfc', '.smc', '.zip'], ejs: 'snes', lb: 'Super Nintendo Entertainment System', lr: ['Nintendo - Super Nintendo Entertainment System'] },
+  n64: { label: 'Nintendo 64', dir: path.join(GAMES_ROOT, 'Nintendo 64', 'Roms'), exts: ['.z64', '.n64', '.v64', '.zip'], ejs: 'n64', lb: 'Nintendo 64', lr: ['Nintendo - Nintendo 64'] },
   subidos: { label: 'Subidos', dir: LOCAL_ROMS, exts: ['.nes', '.zip', '.bin', '.md', '.smd', '.gen'], writable: true }
 };
+for (const id of Object.keys(SYSTEMS)) SYSTEMS[id].id = id;
+// Where each console's folder is looked for under the games folder: by name (up to 3 levels deep),
+// and a "Roms" folder inside it wins if it holds more games. Never by extension alone: a PlayStation
+// .bin would pass for Genesis.
+const FOLDER_NAMES = {
+  nes: /^(nes|famicom|familycomputer|nintendones|nintendofamicom|nintendoentertainmentsystem)$/,
+  genesis: /^(genesis|megadrive|megadrivegenesis|genesismegadrive|segagenesis|segamegadrive|segamegadrivegenesis)$/,
+  arcade: /^(mame|arcade|fbneo|fba|finalburnneo|neogeo|mame2003|mame2003plus)$/,
+  snes: /^(snes|supernes|superfamicom|supernintendo|nintendosnes|supernintendoentertainmentsystem)$/,
+  n64: /^(n64|nintendo64)$/
+};
+const DEFAULT_DIRS = { nes: ['NES'], genesis: ['Sega Genesis'], arcade: ['MAME', 'Roms'], snes: ['Super Nintendo', 'Roms'], n64: ['Nintendo 64', 'Roms'] };
+function findConsoleDirs(root) {
+  const found = {};
+  const queue = [[root, 1]];
+  const count = (dir, id) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile() && SYSTEMS[id].exts.some(x => e.name.toLowerCase().endsWith(x))).length; } catch (e) { return 0; } };
+  for (let i = 0; i < queue.length && i < 1500; i++) {
+    const [dir, depth] = queue[i];
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || /^(covers|node_modules|\$recycle\.bin|system volume information)$/i.test(e.name)) continue;
+      const full = path.join(dir, e.name), key = squash(e.name);
+      const id = Object.keys(FOLDER_NAMES).find(k => FOLDER_NAMES[k].test(key));
+      if (!id) { if (depth < 3) queue.push([full, depth + 1]); continue; }
+      // (a matched folder is read below)
+      let best = { dir: full, n: count(full, id), depth };
+      try {
+        const roms = fs.readdirSync(full, { withFileTypes: true }).find(x => x.isDirectory() && /^roms?$/i.test(x.name));
+        if (roms) { const n = count(path.join(full, roms.name), id); if (n >= best.n) best = { dir: path.join(full, roms.name), n, depth }; }
+      } catch (err) {}
+      const cur = found[id];
+      if (!cur || best.n > cur.n || (best.n === cur.n && best.depth < cur.depth)) found[id] = best;
+      // A wrapper with no games of its own ("Arcade/FBNeo/..."): look inside.
+      if (best.n === 0 && depth < 3) queue.push([full, depth + 1]);
+    }
+  }
+  return found;
+}
+let consoleDirs = {};
+// Points every console at its detected folder (or the usual place, which then reads as missing).
+function applyRoot() {
+  consoleDirs = findConsoleDirs(GAMES_ROOT);
+  for (const id of Object.keys(DEFAULT_DIRS)) SYSTEMS[id].dir = consoleDirs[id] ? consoleDirs[id].dir : path.join(GAMES_ROOT, ...DEFAULT_DIRS[id]);
+  sysIndex.clear(); coverCache.clear(); localCovers.clear();
+}
 
 function getSys(id) {
   id = String(id || '').toLowerCase();
@@ -77,10 +138,191 @@ function tidyName(file) {
     .replace(/_+/g, ' ').replace(/\s+/g, ' ').trim().replace(/^(.+?), (The|A|An)( - .*)?$/i, (m, rest, article, sub) => article + ' ' + rest + (sub || ''));
   return { name, tag: tags.join(' · ') };
 }
+// Arcade ROMs are named by MAME's short code ("mslug"). LaunchBox's MAME.xml maps it to the title;
+// it is 46 MB, so it is read once, the first time an arcade ROM needs it.
+let mameTitles = null;
+function mameTitle(file) {
+  if (!mameTitles) {
+    mameTitles = new Map();
+    try {
+      const xml = fs.readFileSync(path.join(LAUNCHBOX, 'Metadata', 'MAME.xml'), 'utf8');
+      const block = /<MameFile>([\s\S]*?)<\/MameFile>/g;
+      let m;
+      while ((m = block.exec(xml))) {
+        const code = xmlText(m[1], 'FileName').toLowerCase(), title = xmlText(m[1], 'Name');
+        if (code && title && title.toLowerCase() !== code) mameTitles.set(code, { title, year: xmlText(m[1], 'Year') });
+      }
+    } catch (e) { /* sin MAME.xml: se queda el nombre corto */ }
+  }
+  return mameTitles.get(file.replace(/\.zip$/i, '').toLowerCase()) || null;
+}
+// Arcade romset lists: FinalBurn Neo's and MAME 2003-Plus's public DATs (name -> description, parent, BIOS, CHD,
+// every ROM with its CRC). Downloaded once, boiled down and kept in cache/libretro. They give arcade games
+// their real titles and tell which core can run each ZIP.
+const DATS = {
+  fbneo: { url: 'https://raw.githubusercontent.com/libretro/FBNeo/master/dats/' + encodeURIComponent('FinalBurn Neo (ClrMame Pro XML, Arcade only).dat') },
+  // MAME 2003 itself is not used: EmulatorJS 4.2.3's build of that core crashes on every game (checked).
+  mame2003_plus: { url: 'https://raw.githubusercontent.com/libretro/mame2003-plus-libretro/master/metadata/mame2003-plus.xml' }
+};
+const xmlDecode = s => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+const xmlAttrs = s => { const a = {}; for (const m of s.matchAll(/([\w:]+)="([^"]*)"/g)) a[m[1]] = xmlDecode(m[2]); return a; };
+function parseDat(xml) {
+  const games = {};
+  for (const m of xml.matchAll(/<game\s([^>]*?)>([\s\S]*?)<\/game>/g)) {
+    const a = xmlAttrs(m[1]);
+    if (!a.name) continue;
+    const roms = [];
+    for (const r of m[2].matchAll(/<rom\s([^>]*?)\/?>/g)) {
+      const x = xmlAttrs(r[1]);
+      if (x.name && x.status !== 'nodump') roms.push([x.name, (x.crc || '').toLowerCase(), x.merge ? 1 : 0]);
+    }
+    const desc = m[2].match(/<description>([^<]*)<\/description>/);
+    games[a.name.toLowerCase()] = { d: desc ? xmlDecode(desc[1]) : '', c: (a.cloneof || '').toLowerCase(), r: (a.romof || '').toLowerCase(), b: a.isbios === 'yes' || a.runnable === 'no' ? 1 : 0, k: [...m[2].matchAll(/<disk\s([^>]*?)\/?>/g)].map(d => xmlAttrs(d[1]).name).filter(Boolean), f: roms };
+  }
+  return games;
+}
+const dats = new Map();
+// A DAT as Map(code -> game), or null while it is not on disk yet (then it is downloaded in the background).
+function datFor(which) {
+  if (options.libretro === false) return null;
+  let d = dats.get(which), stale = false;
+  if (d === undefined) {
+    d = null; stale = true;
+    try { const f = JSON.parse(fs.readFileSync(path.join(LR_DIR, 'dat-' + which + '.json'), 'utf8')); if (f.v !== 3) throw new Error('old'); d = new Map(Object.entries(f.games)); stale = Date.now() - f.at > LR_MAX_AGE; } catch (e) {}
+    dats.set(which, d);
+    if (!stale) return d;
+  } else if (d || lrTried.get('dat-' + which) > Date.now() - 3600000) return d;
+  const key = 'dat-' + which;
+  if (!lrBusy.has(key) && !(lrTried.get(key) > Date.now() - 3600000)) {
+    lrTried.set(key, Date.now());
+    lrBusy.set(key, (async () => {
+      const games = parseDat((await fetchDat(which)).toString('utf8'));
+      fs.mkdirSync(LR_DIR, { recursive: true });
+      fs.writeFileSync(path.join(LR_DIR, key + '.json'), JSON.stringify({ v: 3, at: Date.now(), games }));
+      dats.set(which, new Map(Object.entries(games)));
+      lrEpoch++; coverCache.clear();
+    })().catch(() => {}).finally(() => lrBusy.delete(key)));
+  }
+  return d;
+}
+function fbneoTitle(file) {
+  const code = file.replace(/\.zip$/i, '').toLowerCase();
+  const g = (datFor('fbneo') || new Map()).get(code);
+  if (!g || !g.d) return null;
+  const title = g.d.replace(/ \(.*$/, ''), tags = [...g.d.slice(title.length).matchAll(/\(([^)]*)\)/g)].map(m => m[1]);
+  return title && title !== code ? { title, year: '', tag: tags.join(' · ') } : null;
+}
+// Names (with CRC32) of what a ZIP holds, read from its central directory without unpacking.
+const zipDirs = new Map();
+function zipEntries(dir, code) {
+  const full = path.join(dir, code + '.zip');
+  let st;
+  try { st = fs.statSync(full); } catch (e) { return null; }
+  const hit = zipDirs.get(full);
+  if (hit && hit.size === st.size && hit.mtime === st.mtimeMs) return hit.entries;
+  const entries = { crcs: new Set(), names: new Set() };
+  let fd;
+  try {
+    fd = fs.openSync(full, 'r');
+    const tail = Buffer.alloc(Math.min(st.size, 65557));
+    fs.readSync(fd, tail, 0, tail.length, st.size - tail.length);
+    const end = tail.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    if (end < 0) throw new Error('no zip');
+    const count = tail.readUInt16LE(end + 10), cd = Buffer.alloc(tail.readUInt32LE(end + 12));
+    fs.readSync(fd, cd, 0, cd.length, tail.readUInt32LE(end + 16));
+    for (let i = 0, p = 0; i < count && p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50; i++) {
+      const nameLen = cd.readUInt16LE(p + 28), skip = nameLen + cd.readUInt16LE(p + 30) + cd.readUInt16LE(p + 32);
+      entries.crcs.add(cd.readUInt32LE(p + 16).toString(16).padStart(8, '0'));
+      entries.names.add(cd.toString('utf8', p + 46, p + 46 + nameLen).split('/').pop().toLowerCase());
+      p += 46 + skip;
+    }
+  } catch (e) { entries.broken = true; }
+  finally { if (fd !== undefined) try { fs.closeSync(fd); } catch (e) {} }
+  zipDirs.set(full, { size: st.size, mtime: st.mtimeMs, entries });
+  return entries;
+}
+// null when `code` runs with this DAT's core, else { rank, reason }: lower ranks are closer to working.
+// Games that run from a hard disk image (CHD). The browser emulators read at most version 3 and the page
+// does not hand them the file yet, so these never run; the message says what is wrong with the user's file.
+function chdProblem(dir, code, g) {
+  const name = g.k[0], file = [code, g.c, g.r].filter(Boolean).map(c => path.join(dir, c, name + '.chd')).find(f => fs.existsSync(f));
+  if (!file) return { rank: 3, reason: 'Falta el disco CHD (' + code + '\\' + name + '.chd)' };
+  let version = 0;
+  try { const fd = fs.openSync(file, 'r'), head = Buffer.alloc(16); fs.readSync(fd, head, 0, 16, 0); fs.closeSync(fd); if (head.toString('latin1', 0, 8) === 'MComprHD') version = head.readUInt32BE(12); } catch (e) {}
+  if (version >= 4) return { rank: 3, reason: 'Necesita su disco CHD en versión 3; el tuyo es v' + version + ' (MAME moderno), que el emulador del navegador todavía no lee' };
+  return { rank: 3, reason: 'Necesita disco CHD: todavía no soportado' };
+}
+const PAGE_BIOS = ['neogeo', 'pgm', 'skns'];
+function romsetProblem(dat, dir, code) {
+  const g = dat.get(code);
+  if (!g) return { rank: 9 };
+  if (g.k.length) return chdProblem(dir, code, g);
+  const own = zipEntries(dir, code);
+  const sets = [own], absent = [], chain = [], seen = new Set([code]), todo = [g.r, g.c];
+  while (todo.length && chain.length < 8) {
+    const p = todo.pop();
+    if (!p || seen.has(p)) continue;
+    seen.add(p); chain.push(p);
+    const pg = dat.get(p);
+    if (pg) todo.push(pg.r, pg.c);
+  }
+  for (const p of chain) { const z = zipEntries(dir, p); if (z && !z.broken) sets.push(z); else absent.push(p); }
+  const bios = absent.find(p => dat.get(p) && dat.get(p).b);
+  if (bios) return { rank: 1, reason: 'Falta el BIOS ' + bios + '.zip' };
+  // ROMs marked as merged come from the parent set; the ones that belong to a BIOS only need its ZIP to be there.
+  const parentCrcs = new Set();
+  for (const p of chain) { const pg = dat.get(p); if (pg && !pg.b) for (const f of pg.f) parentCrcs.add(f[1]); }
+  // The page can hand the emulator one BIOS ZIP (see /api/arcade-bios). A game whose merged ROMs live in any other BIOS
+  // set cannot start, even with the file in the folder (unless the ZIP carries those ROMs itself). A lone ROM
+  // (a sound or MCU chip such as namcoc76) is not a system BIOS: Tekken starts without it.
+  const merged = g.f.filter(f => f[2] && !(own && own.crcs.has(f[1]))).map(f => f[1]);
+  const lacking = chain.find(p => dat.get(p) && dat.get(p).b && !PAGE_BIOS.includes(p) && dat.get(p).f.length > 1 && dat.get(p).f.some(f => merged.includes(f[1])));
+  if (lacking) return { rank: 2, reason: 'Necesita el BIOS ' + lacking + '.zip, que el emulador todavía no recibe' };
+  const found = ([name, crc]) => sets.some(z => crc && crc !== '00000000' ? z.crcs.has(crc) : z.names.has(name.toLowerCase()));
+  if (g.f.every(f => (f[2] && !parentCrcs.has(f[1])) || found(f))) return null;
+  return absent.length ? { rank: 1, reason: 'Falta el juego padre ' + absent[0] + '.zip' } : { rank: 2, reason: 'Versión de ROMs distinta' };
+}
+const compatCache = new Map();
+// { core } with the best core for an arcade ZIP (FBNeo, else MAME 2003-Plus), { reason } when none can, or null while the DATs are unknown.
+function arcadeCompat(dir, file, dirMtime) {
+  const code = file.replace(/\.zip$/i, '').toLowerCase();
+  let st;
+  try { st = fs.statSync(path.join(dir, file)); } catch (e) { return null; }
+  const key = dir + '|' + file, stamp = st.size + '|' + st.mtimeMs + '|' + dirMtime + '|' + lrEpoch + '|' + Math.floor(Date.now() / 60000);
+  const hit = compatCache.get(key);
+  if (hit && hit.stamp === stamp) return hit.value;
+  const problems = [], loaded = { fbneo: datFor('fbneo'), mame2003_plus: datFor('mame2003_plus') };   // both start downloading together
+  let value;
+  for (const core of ['fbneo', 'mame2003_plus']) {
+    const dat = loaded[core];
+    if (!dat) { value = null; break; }
+    const problem = romsetProblem(dat, dir, code);
+    if (!problem) { value = { core }; break; }
+    problems.push(problem);
+  }
+  if (value === undefined) {
+    const best = problems.reduce((a, b) => b.rank < a.rank ? b : a);
+    value = { reason: best.reason || 'No está en FBNeo ni en MAME 2003-Plus' };
+  }
+  compatCache.set(key, { stamp, value });
+  return value;
+}
 function gameInfo(sys, file) {
   const known = launchBoxTitles().get(path.join(sys.dir, file).toLowerCase());
   const tidy = tidyName(file);
-  return { name: known ? known.title : tidy.name || file, year: known ? known.year : '', tag: tidy.tag };
+  // LaunchBox's own title first, then (arcade) MAME.xml and FinalBurn Neo's list, then the No-Intro
+  // name of the thumbnail that matches the cleaned file name, then the cleaned file name.
+  let found = known, tag = tidy.tag;
+  if (!found && sys === SYSTEMS.arcade) {
+    found = mameTitle(file);
+    const dat = fbneoTitle(file);
+    if (dat) { found = found || dat; tag = dat.tag || tag; }
+  }
+  if (!found && sys.lr) {
+    const t = lrTitle(sys.id, matchKey(tidy.name));
+    if (t) found = { title: t, year: '' };
+  }
+  return { name: found ? found.title : tidy.name || file, year: found ? found.year : '', tag, named: !!found };
 }
 
 // Per-folder listing cache: one readdir + stat per file, redone only when the folder
@@ -95,7 +337,7 @@ function systemItems(id) {
   try { dirStat = fs.statSync(sys.dir); } catch (e) { sysIndex.delete(id); return null; }
   const known = launchBoxTitles();
   const hit = sysIndex.get(id);
-  if (hit && hit.mtime === dirStat.mtimeMs && hit.titles === known && Date.now() - hit.at < 60000) return hit;
+  if (hit && hit.mtime === dirStat.mtimeMs && hit.titles === known && hit.epoch === lrEpoch && Date.now() - hit.at < 60000) return hit;
   let files = [];
   try { files = fs.readdirSync(sys.dir); } catch (e) { sysIndex.delete(id); return null; }
   const items = [];
@@ -107,28 +349,33 @@ function systemItems(id) {
     let size = 0;
     try { const stat = fs.statSync(path.join(sys.dir, f)); if (!stat.isFile()) continue; size = stat.size; } catch (e) { continue; }
     const { name, year, tag } = gameInfo(sys, f);
-    // Search the full title and the file name: "metal slug" and "mslug" both work.
-    items.push({ file: f, name, year, size, tag, hay: squash(name) + ' ' + squash(f), system: id });
+    // Search the full title and the file name: "metal slug" and "mslug" both work. The title also
+    // goes in Spanish spelling (-tion -> -cion), so "internacional" finds "International Superstar Soccer".
+    const title = squash(name);
+    items.push({ file: f, name, year, size, tag, hay: title + ' ' + title.replace(/tion/g, 'cion') + ' ' + squash(f), system: id, compat: id === 'arcade' ? arcadeCompat(sys.dir, f, dirStat.mtimeMs) : null });
   }
   items.sort((a, b) => collator.compare(a.name, b.name) || collator.compare(a.file, b.file));
   // Same title twice in one console (US and Europe dumps): tell them apart by region tag.
   const seen = new Map();
   for (const it of items) seen.set(it.name, (seen.get(it.name) || 0) + 1);
   for (const it of items) if (seen.get(it.name) > 1 && it.tag) it.variant = it.tag;
-  const next = { mtime: dirStat.mtimeMs, titles: known, at: Date.now(), items, byFile: new Map(items.map(it => [it.file, it])) };
+  const next = { mtime: dirStat.mtimeMs, titles: known, epoch: lrEpoch, at: Date.now(), items, byFile: new Map(items.map(it => [it.file, it])) };
   sysIndex.set(id, next);
   return next;
 }
 function gameJson(it) {
   const sys = SYSTEMS[it.system];
-  const core = it.system === 'nes' || (it.system === 'subidos' && /\.nes$/i.test(it.file)) ? '&core=nes' : '';
-  const cover = coverName(it.system, it.file);
+  // Arcade: the core that can run the ZIP (FBNeo, else MAME 2003); when none can, the player still tries FBNeo.
+  const core = it.system === 'nes' || (it.system === 'subidos' && /\.nes$/i.test(it.file)) ? '&core=nes' : it.compat && it.compat.core ? '&core=' + it.compat.core : '';
+  // The saved image (or the user's own) beside the games, else the first source that knows this game.
+  const local = localCover(it.system, it.file), cover = local ? { id: 'l' + local.v } : coverList(it.system, it.file)[0];
   const out = {
     file: it.file, name: it.name, year: it.year, size: it.size, system: it.system, systemLabel: sys.label,
     play: '/play-ejs.html?system=' + it.system + '&file=' + encodeURIComponent(it.file) + core,
-    cover: cover ? '/api/cover/' + it.system + '/' + encodeURIComponent(it.file) + '?v=' + cover.replace(/\.\w+$/, '') + '-' + COVER_WIDTH : null
+    cover: cover ? '/api/cover/' + it.system + '/' + encodeURIComponent(it.file) + '?v=' + cover.id + '-' + COVER_WIDTH : null
   };
   if (it.variant) out.variant = it.variant;
+  if (it.compat && it.compat.reason) { out.compat = false; out.reason = it.compat.reason; }
   return out;
 }
 // sysId 'all' joins every console (minus `not`), same title in two consoles shows twice.
@@ -150,8 +397,13 @@ function listGames(sysId, q, limit, offset, not) {
   return { total, games: out.map(gameJson) };
 }
 
-// Covers: LaunchBox's metadata (read only SQLite) says which image belongs to a game; the
-// image itself is downloaded once from LaunchBox's CDN into ./cache/covers and served from there.
+// Covers: libretro-thumbnails (free, matched by exact title) is the main source; if LaunchBox is
+// installed, its metadata (read only SQLite) is one more. An image is downloaded once, shrunk, and
+// kept in ./cache/covers. Optionally (coversBesideGames in settings.json, or COVERS_IN_GAMES=1) they are saved
+// as <console folder>/covers/<rom name>.webp so they travel with the collection; if that folder cannot be
+// written, ./cache/covers is used instead. Either way a picture found in <console folder>/covers with the ROM's
+// name (.png, .jpg, .webp) wins. The ROMs themselves are never touched.
+const COVERS_BESIDE = options.coversBesideGames ?? (process.env.COVERS_IN_GAMES === '1' || readSettings().coversBesideGames === true);
 const COVER_CACHE = path.resolve(options.coverCacheDir || path.join(__dirname, 'cache', 'covers'));
 const COVER_MAX = 24 * 1024 * 1024;
 // Covers are stored small: WebP, 400 px wide at most (a card is ~190 px, sharp on 2x screens).
@@ -163,6 +415,29 @@ function coverSharp() {
 }
 // Without sharp the original image is kept as is.
 const coverFile = name => coverSharp() ? name.replace(/\.\w+$/, '.webp') : name;
+// Images beside the games, per console, found by the ROM's name without extension. The user's own
+// .png/.jpg beat our .webp. The folder is read again every 10 s (and after each save).
+const COVER_EXTS = ['.png', '.jpg', '.jpeg', '.webp'];
+const localCovers = new Map();
+function localCover(sysId, file) {
+  const dir = path.join(SYSTEMS[sysId].dir, 'covers');
+  let hit = localCovers.get(sysId);
+  if (!hit || hit.dir !== dir || Date.now() - hit.at > 10000) {
+    const files = new Map();
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        const ext = path.extname(name).toLowerCase(), rank = COVER_EXTS.indexOf(ext), stem = name.slice(0, -ext.length).toLowerCase();
+        if (rank >= 0 && (!files.has(stem) || rank < files.get(stem).rank)) files.set(stem, { name, rank });
+      }
+    } catch (e) { /* sin carpeta covers */ }
+    hit = { at: Date.now(), dir, files };
+    localCovers.set(sysId, hit);
+  }
+  const found = hit.files.get(file.replace(/\.[^.]+$/, '').toLowerCase());
+  if (!found) return null;
+  const full = path.join(dir, found.name);
+  try { return { full, v: Math.floor(fs.statSync(full).mtimeMs) }; } catch (e) { return null; }
+}
 // First match wins: box art, then a fan box, then a flyer, then a title or gameplay shot, marquee last.
 const COVER_TYPES = ['Box - Front', 'Box - Front - Reconstructed', 'Fanart - Box - Front', 'Advertisement Flyer - Front', 'Screenshot - Game Title', 'Screenshot - Gameplay', 'Arcade - Marquee'];
 const COVER_REGIONS = ['North America', 'United States', 'World'];
@@ -220,77 +495,215 @@ function platformNames(platform) {
 }
 const coverCache = new Map();
 let coverStamp = null;
-// File name of the cover image for a ROM, or null (no database, no safe match, no image).
-function coverName(sysId, file) {
-  if (!SYSTEMS[sysId].lb || !coverDb()) return null;
+// libretro-thumbnails: free box art named after the No-Intro / MAME title, the main source of covers
+// and of tidy names. Each console's directory listing is downloaded once into cache/libretro
+// (renewed monthly); a ROM only gets a thumbnail whose title is exactly the same once normalized.
+// lrEpoch changes whenever a new listing arrives, so cached names and covers are worked out again.
+let lrEpoch = 0;
+const LR_HOST = 'https://thumbnails.libretro.com/';
+const LR_TYPES = ['Named_Boxarts', 'Named_Titles', 'Named_Snaps'];
+const LR_DIR = path.resolve(options.libretroCacheDir || path.join(__dirname, 'cache', 'libretro'));
+const LR_MAX_AGE = 30 * 24 * 3600 * 1000;
+const lrIndex = new Map(), lrBusy = new Map(), lrTried = new Map();
+const lrAbort = new AbortController();
+// Names in the listing are percent-encoded; "[...]" marks dumps with hacks or bad dumps: skipped.
+function lrStems(html) {
+  const out = [];
+  for (const m of html.matchAll(/<a href="([^"?\/][^"]*)\.png"/g)) {
+    let stem;
+    try { stem = decodeURIComponent(m[1].replace(/&amp;/g, '&')); } catch (e) { continue; }
+    if (!stem.includes('[')) out.push(stem);
+  }
+  return out;
+}
+// Lower is better: USA/World, then Europe; betas, prototypes and the like last.
+function lrRank(tags) {
+  const region = /\b(USA|US|World)\b/.test(tags) ? 0 : /\bEurope\b/.test(tags) ? 1 : /\b(Japan|JP|Korea|China|Taiwan|Asia|Brazil|Hong Kong)\b/.test(tags) ? 3 : 2;
+  return region + (/\b(Beta|Proto|Prototype|Demo|Sample|Unl|Pirate|Hack|Kiosk|Bootleg|Alt)\b/i.test(tags) ? 10 : 0);
+}
+// Match key -> best thumbnail: box art before title screen before snap, then region.
+function lrBuild(sysId, libs) {
+  const map = new Map();
+  SYSTEMS[sysId].lr.forEach((lib, l) => LR_TYPES.forEach((type, t) => {
+    for (const stem of (libs[lib] && libs[lib][type]) || []) {
+      const title = stem.replace(/ \(.*$/, '');
+      const rank = t * 100 + l * 50 + lrRank(stem.slice(title.length));
+      // The file names swap "&" for "_" ("Rock _ Roll Racing").
+      for (const k of new Set([matchKey(title), matchKey(title.replace(/_/g, ' and '))])) {
+        const cur = k && map.get(k);
+        if (k && (!cur || rank < cur.rank || (rank === cur.rank && stem.length < cur.stem.length))) map.set(k, { lib, type, stem, title, rank });
+      }
+    }
+  }));
+  return map;
+}
+function lrRefresh(sysId) {
+  lrTried.set(sysId, Date.now());
+  const job = (async () => {
+    const libs = {};
+    for (const lib of SYSTEMS[sysId].lr) {
+      libs[lib] = {};
+      for (const type of LR_TYPES) {
+        try { libs[lib][type] = lrStems((await fetchLibretro(encodeURIComponent(lib) + '/' + type + '/')).toString('utf8')); }
+        catch (e) { if (e.message !== 'HTTP 404') throw e; libs[lib][type] = []; }
+      }
+    }
+    const at = Date.now(), file = path.join(LR_DIR, sysId + '.json');
+    fs.mkdirSync(LR_DIR, { recursive: true });
+    fs.writeFileSync(file + '.tmp', JSON.stringify({ at, libs }));
+    fs.renameSync(file + '.tmp', file);
+    lrIndex.set(sysId, { at, map: lrBuild(sysId, libs) });
+    lrEpoch++; coverCache.clear();   // names and covers worked out before the listing arrived may improve now
+  })().catch(() => {}).finally(() => lrBusy.delete(sysId));
+  lrBusy.set(sysId, job);
+}
+// The listing comes from disk; a missing or old one is downloaded in the background (retried hourly).
+function lrIndexFor(sysId) {
+  let idx = lrIndex.get(sysId);
+  if (idx === undefined) {
+    idx = null;
+    try { const d = JSON.parse(fs.readFileSync(path.join(LR_DIR, sysId + '.json'), 'utf8')); idx = { at: d.at, map: lrBuild(sysId, d.libs) }; } catch (e) {}
+    lrIndex.set(sysId, idx);
+  }
+  if ((!idx || Date.now() - idx.at > LR_MAX_AGE) && !lrBusy.has(sysId) && !(lrTried.get(sysId) > Date.now() - 3600000)) lrRefresh(sysId);
+  return idx;
+}
+// The No-Intro title of the thumbnail with this match key, for tidier names ("Rock _ Roll" is ambiguous: skipped).
+function lrTitle(sysId, key) {
+  if (!key || options.libretro === false) return null;
+  const idx = lrIndexFor(sysId), c = idx && idx.map.get(key);
+  if (!c || c.title.includes('_')) return null;
+  return c.title.replace(/^(.+?), (The|A|An)( - .*)?$/i, (m, rest, article, sub) => article + ' ' + rest + (sub || ''));
+}
+function libretroCover(sysId, keys) {
+  if (!SYSTEMS[sysId].lr || options.libretro === false) return null;
+  const idx = lrIndexFor(sysId);
+  for (const k of keys) {
+    const c = idx && idx.map.get(k);
+    // The name comes from a listing we downloaded, but it still must be a plain file name before it goes into a URL.
+    if (c && /^[^\\/:*?"<>|\x00-\x1f]{1,200}$/.test(c.stem)) {
+      const id = 'lr-' + crypto.createHash('sha1').update(c.lib + '/' + c.type + '/' + c.stem).digest('hex').slice(0, 16);
+      return { id, file: id + '.png', lr: encodeURIComponent(c.lib) + '/' + c.type + '/' + encodeURIComponent(c.stem + '.png') };
+    }
+  }
+  return null;
+}
+// Covers for a ROM, best first, each { id, file, lr? }: libretro's (exact title), then LaunchBox's if it
+// is installed (by id, or by exact title). Empty when nothing is known for sure.
+function coverList(sysId, file) {
+  const sys = SYSTEMS[sysId];
+  if (!sys.lb) return [];
   const known = launchBoxTitles();
   if (known !== coverStamp) { coverCache.clear(); coverStamp = known; }
   const key = sysId + '/' + file;
   if (coverCache.has(key)) return coverCache.get(key);
-  let name = null;
+  const list = [];
+  // Titles to match by name. Arcade file names are MAME codes: only a real title (LaunchBox, MAME.xml) counts.
+  const info = gameInfo(sys, file), keys = [];
+  for (const title of sysId === 'arcade' ? (info.named ? [info.name] : []) : [tidyName(file).name, info.name]) {
+    const k = matchKey(title);
+    if (k && !keys.includes(k)) keys.push(k);
+  }
+  const lr = libretroCover(sysId, keys);
+  if (lr) list.push(lr);
   try {
-    const entry = known.get(path.join(SYSTEMS[sysId].dir, file).toLowerCase());
-    // In a LaunchBox list: its id is exact. Otherwise only an exact title match counts (arcade names are MAME codes).
-    const ids = entry && entry.id ? [entry.id] : [];
-    if (sysId !== 'arcade') {
-      const list = platformNames(SYSTEMS[sysId].lb).get(matchKey(tidyName(file).name)) || [];
-      ids.push(...list.slice().sort((a, b) => a.r - b.r || a.id - b.id).map(c => c.id));
+    if (coverDb()) {
+      const entry = known.get(path.join(sys.dir, file).toLowerCase());
+      // In a LaunchBox list: its id is exact. Otherwise only an exact title match counts.
+      const ids = entry && entry.id ? [entry.id] : [];
+      for (const k of keys) ids.push(...(platformNames(sys.lb).get(k) || []).slice().sort((a, b) => a.r - b.r || a.id - b.id).map(c => c.id));
+      for (const id of ids) {
+        const name = bestImage(id);
+        if (name) { list.push({ id: name.replace(/\.\w+$/, ''), file: name }); break; }
+      }
     }
-    for (const id of ids) { name = bestImage(id); if (name) break; }
-  } catch (e) { name = null; }
-  coverCache.set(key, name);
-  return name;
+  } catch (e) { /* LaunchBox es opcional */ }
+  coverCache.set(key, list);
+  return list;
+}
+// Reads a response body, refusing anything bigger than `max`.
+async function readBody(r, max) {
+  const chunks = []; let size = 0;
+  for await (const chunk of r.body) {
+    size += chunk.length;
+    if (size > max) throw new Error('respuesta demasiado grande');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 // Downloads one image from LaunchBox's CDN (the default `fetchCover`), refusing anything that is not a small image.
 async function downloadCover(name) {
   const r = await fetch('https://images.launchbox-app.com/' + name, { signal: AbortSignal.timeout(20000) });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   if (!/^image\//i.test(r.headers.get('content-type') || '')) throw new Error('no es una imagen');
-  const chunks = []; let size = 0;
-  for await (const chunk of r.body) {
-    size += chunk.length;
-    if (size > COVER_MAX) throw new Error('imagen demasiado grande');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
+  return readBody(r, COVER_MAX);
+}
+// A path under thumbnails.libretro.com (the default `fetchLibretro`): an image, or a directory listing when it ends in "/".
+async function downloadLibretro(pathname) {
+  const listing = pathname.endsWith('/');
+  const r = await fetch(LR_HOST + pathname, { signal: AbortSignal.any([AbortSignal.timeout(listing ? 90000 : 20000), lrAbort.signal]) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!new RegExp(listing ? '^text/html' : '^image/', 'i').test(r.headers.get('content-type') || '')) throw new Error('respuesta inesperada');
+  return readBody(r, COVER_MAX);
+}
+// A romset list, "fbneo" or "mame2003_plus" (the default `fetchDat`).
+async function downloadDat(which) {
+  const r = await fetch(DATS[which].url, { signal: AbortSignal.any([AbortSignal.timeout(90000), lrAbort.signal]) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return readBody(r, 40 * 1024 * 1024);
 }
 const fetchCover = options.fetchCover || downloadCover;
+const fetchLibretro = options.fetchLibretro || downloadLibretro;
+const fetchDat = options.fetchDat || downloadDat;
 const coverJobs = new Map(), coverFails = new Map();
 let coverBusy = 0;
 const coverQueue = [];
-// A few downloads at a time; the same image asked twice shares one download.
-function ensureCover(name) {
-  const full = path.join(COVER_CACHE, coverFile(name));
-  if (fs.existsSync(full)) return Promise.resolve(full);
-  if (coverFails.get(name) > Date.now()) return Promise.reject(new Error('reintento pendiente'));
-  if (coverJobs.has(name)) return coverJobs.get(name);
-  const job = new Promise((resolve, reject) => coverQueue.push({ name, full, resolve, reject }));
-  coverJobs.set(name, job);
-  job.catch(() => {}).finally(() => coverJobs.delete(name));
+// A few downloads at a time (LaunchBox and libretro share the limit); the same ROM asked twice shares one download.
+// Resolves to the image to serve: the one saved beside the games, or in ./cache/covers.
+function ensureCover(sysId, file, cover) {
+  const fallback = path.join(COVER_CACHE, coverFile(cover.file));
+  if (fs.existsSync(fallback)) return Promise.resolve(fallback);
+  const key = sysId + '/' + file;
+  if (coverFails.get(cover.id) > Date.now()) return Promise.reject(new Error('reintento pendiente'));
+  if (coverJobs.has(key)) return coverJobs.get(key);
+  const job = new Promise((resolve, reject) => coverQueue.push({ sysId, file, cover, fallback, resolve, reject }));
+  coverJobs.set(key, job);
+  job.catch(() => {}).finally(() => coverJobs.delete(key));
   pumpCovers();
   return job;
 }
+// Writes through a temporary file so a half-written image is never served.
+function saveCover(full, data) {
+  const tmp = full + '.' + process.pid + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, full);
+  } catch (e) { try { fs.unlinkSync(tmp); } catch (e2) {} throw e; }
+}
 function pumpCovers() {
   while (coverBusy < 4 && coverQueue.length) {
-    const { name, full, resolve, reject } = coverQueue.shift();
+    const { sysId, file, cover, fallback, resolve, reject } = coverQueue.shift();
     coverBusy++;
     (async () => {
-      fs.mkdirSync(COVER_CACHE, { recursive: true });
-      const tmp = full + '.' + process.pid + '.tmp';
       try {
-        let data = await fetchCover(name);
-        if (coverSharp()) data = await coverSharp()(data).resize({ width: COVER_WIDTH, withoutEnlargement: true, fit: 'inside' }).webp({ quality: 80 }).toBuffer();
-        fs.writeFileSync(tmp, data);
-        fs.renameSync(tmp, full);
-        resolve(full);
+        let data = cover.lr ? await fetchLibretro(cover.lr) : await fetchCover(cover.file);
+        let ext = path.extname(cover.file);
+        if (coverSharp()) { data = await coverSharp()(data).resize({ width: COVER_WIDTH, withoutEnlargement: true, fit: 'inside' }).webp({ quality: 80 }).toBuffer(); ext = '.webp'; }
+        const beside = path.join(SYSTEMS[sysId].dir, 'covers', file.replace(/\.[^.]+$/, '') + ext);
+        let saved = fallback;
+        if (COVERS_BESIDE) { try { saveCover(beside, data); localCovers.delete(sysId); saved = beside; } catch (e) { /* folder not writable */ } }
+        if (saved === fallback) saveCover(fallback, data);
+        resolve(saved);
       } catch (e) {
-        try { fs.unlinkSync(tmp); } catch (e2) {}
-        coverFails.set(name, Date.now() + 60000);
+        coverFails.set(cover.id, Date.now() + 60000);
         reject(e);
       } finally { coverBusy--; pumpCovers(); }
     })();
   }
 }
+
+applyRoot();
 
 const app = express();
 app.use(express.json());
@@ -301,15 +714,69 @@ app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0 }));
 
 // Ambos protocolos comparten el servidor HTTP, sin un proxy ni otro proceso.
 
+// Folder paths are for this PC only: whoever comes through the tunnel just sees counts.
 app.get('/api/systems', (req, res) => {
+  const local = fromThisPc(req);
   res.json({
-    gamesRoot: GAMES_ROOT,
+    gamesRoot: local ? GAMES_ROOT : undefined,
     systems: Object.keys(SYSTEMS).map(id => {
       const index = systemItems(id);
-      return { id, label: SYSTEMS[id].label, count: index ? index.items.length : 0, writable: !!SYSTEMS[id].writable, core: SYSTEMS[id].ejs || null, onlinePlayers: 2, onlineExperimental: id !== 'nes', missing: index ? null : SYSTEMS[id].dir };
+      return { id, label: SYSTEMS[id].label, count: index ? index.items.length : 0, writable: !!SYSTEMS[id].writable, core: SYSTEMS[id].ejs || null, onlinePlayers: 2, onlineExperimental: id !== 'nes', missing: index ? null : local ? SYSTEMS[id].dir : true };
     })
   });
 });
+
+// Games folder settings: only this PC, only with the page's own header (a web page open in the same
+// browser cannot send it cross-origin), and the Host must be this PC (no DNS rebinding).
+const hostOk = req => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(req.headers.host || '');
+const ownerOnly = word => (req, res, next) => fromThisPc(req) && hostOk(req) && req.get('x-remotegame') === word ? next() : res.status(403).json({ ok: false, msg: 'no permitido' });
+function describeRoot() {
+  return {
+    ok: true, gamesRoot: GAMES_ROOT, locked: ROOT_LOCKED, exists: isDir(GAMES_ROOT),
+    consoles: Object.keys(DEFAULT_DIRS).map(id => ({ id, label: SYSTEMS[id].label, dir: consoleDirs[id] ? consoleDirs[id].dir : null, count: consoleDirs[id] ? consoleDirs[id].n : 0 }))
+  };
+}
+function isDir(p) { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } }
+// A path typed or pasted by the user: surrounding quotes (Windows' "Copy as path") are dropped.
+function cleanDir(value) {
+  const p = String(value || '').trim().replace(/^"(.*)"$/, '$1');
+  return p && p.length < 1000 && !/[\x00-\x1f]/.test(p) ? path.resolve(p) : null;
+}
+app.get('/api/settings', ownerOnly('settings'), (req, res) => res.json(describeRoot()));
+// What would be found in a folder, without saving it.
+app.post('/api/settings/scan', ownerOnly('settings'), (req, res) => {
+  const dir = cleanDir(req.body && req.body.gamesRoot);
+  if (!dir || !isDir(dir)) return res.status(400).json({ ok: false, msg: 'Esa carpeta no existe.' });
+  const found = findConsoleDirs(dir);
+  res.json({ ok: true, gamesRoot: dir, consoles: Object.keys(DEFAULT_DIRS).map(id => ({ id, label: SYSTEMS[id].label, dir: found[id] ? found[id].dir : null, count: found[id] ? found[id].n : 0 })) });
+});
+app.post('/api/settings', ownerOnly('settings'), (req, res) => {
+  const dir = cleanDir(req.body && req.body.gamesRoot);
+  if (!dir || !isDir(dir)) return res.status(400).json({ ok: false, msg: 'Esa carpeta no existe.' });
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ ...readSettings(), gamesRoot: dir }, null, 2)); }
+  catch (e) { return res.status(500).json({ ok: false, msg: 'No pude guardar los ajustes.' }); }
+  if (!ROOT_LOCKED) { GAMES_ROOT = dir; applyRoot(); }
+  res.json(describeRoot());
+});
+// The native folder dialog of Windows, opened by the server (the page cannot read a real path).
+let picking = false;
+app.post('/api/settings/pick', ownerOnly('settings'), async (req, res) => {
+  if (picking) return res.status(409).json({ ok: false, msg: 'Ya hay un selector abierto.' });
+  picking = true;
+  try { res.json({ ok: true, path: await pickFolder() }); }
+  catch (e) { res.status(501).json({ ok: false, msg: e.message }); }
+  finally { picking = false; }
+});
+const pickFolder = options.pickFolder || (() => new Promise((resolve, reject) => {
+  if (process.platform !== 'win32') return reject(new Error('El selector solo existe en Windows: escribí la ruta.'));
+  // The owner form keeps the dialog in front of the browser; the output is UTF-8 for accented paths.
+  const script = "Add-Type -AssemblyName System.Windows.Forms; [Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+    "$o = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0; StartPosition = 'CenterScreen' }; $o.Show(); " +
+    "$f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Elegí la carpeta donde están tus juegos'; $f.ShowNewFolderButton = $false; " +
+    "if ($f.ShowDialog($o) -eq 'OK') { Write-Output $f.SelectedPath }; $o.Close()";
+  require('child_process').execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-WindowStyle', 'Hidden', '-Command', script],
+    { windowsHide: true, timeout: 180000, encoding: 'utf8' }, (err, out) => err ? reject(new Error('No pude abrir el selector de carpetas.')) : resolve(out.trim() || null));
+}));
 
 app.get('/api/games', (req, res) => {
   const sysId = String(req.query.system || 'nes').toLowerCase();
@@ -318,7 +785,7 @@ app.get('/api/games', (req, res) => {
   if (!sys) return res.status(400).json({ error: 'sistema invalido' });
   const limit = Math.min(Number(req.query.limit) || 200, 2000), offset = Math.max(Number(req.query.offset) || 0, 0);
   const r = listGames(sysId, String(req.query.q || ''), limit, offset, String(req.query.not || '').toLowerCase());
-  res.json({ system: sysId, label: sys.label, dir: sys.writable ? sys.dir : '(solo lectura)', total: r.total, offset, games: r.games, missing: r.missing || null });
+  res.json({ system: sysId, label: sys.label, total: r.total, offset, games: r.games, missing: r.missing ? (fromThisPc(req) ? r.missing : true) : null });
 });
 
 // One game, same JSON as the list (the player page shows its title instead of the file name).
@@ -333,21 +800,24 @@ app.get('/api/game/:system/:file', (req, res) => {
 });
 
 // Cover image of a game in the collection. Public on purpose (the page shows it to guests
-// too), but only images LaunchBox lists for games that exist here are ever downloaded.
+// too), but only images that LaunchBox or libretro list for games that exist here are ever downloaded.
 app.get('/api/cover/:system/:file', async (req, res) => {
   const sys = getSys(req.params.system);
   const f = safeFile(req.params.file);
   if (!sys || !f) return res.status(400).send('sistema o archivo invalido');
-  const index = systemItems(req.params.system.toLowerCase());
-  const name = index && index.byFile.has(f) ? coverName(req.params.system.toLowerCase(), f) : null;
-  if (!name) return res.status(404).send('sin portada');
-  try {
-    const full = await ensureCover(name);
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    res.sendFile(full, { cacheControl: false });
-  } catch (e) {
-    res.status(502).send('no se pudo bajar la portada');
+  const id = req.params.system.toLowerCase();
+  const index = systemItems(id);
+  if (!index || !index.byFile.has(f)) return res.status(404).send('sin portada');
+  const send = full => { res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); res.sendFile(full, { cacheControl: false, dotfiles: 'allow' }); };
+  const local = localCover(id, f);
+  if (local) return send(local.full);
+  const covers = coverList(id, f);
+  if (!covers.length) return res.status(404).send('sin portada');
+  // If one source's image cannot be downloaded, the next gets its turn.
+  for (const cover of covers) {
+    try { return send(await ensureCover(id, f, cover)); } catch (e) { /* siguiente fuente */ }
   }
+  res.status(502).send('no se pudo bajar la portada');
 });
 
 // Sirve ROM en modo lectura. NES .zip -> extrae el .nes en memoria (para jsnes).
@@ -443,7 +913,15 @@ function lanAddresses() {
 }
 app.get('/api/info', (req, res) => {
   const port = server.address()?.port || PORT;
-  res.json({ port, gamesRoot: GAMES_ROOT, version: '0.5.0', lanUrls: lanUrls(), publicUrl: game.publicUrl || null });
+  res.json({ port, gamesRoot: fromThisPc(req) ? GAMES_ROOT : undefined, version: '0.5.0', build: BUILD, lanUrls: lanUrls(), publicUrl: game.publicUrl || null });
+});
+// A newer launch asks this instance to step aside (see the startup block). Only this PC may ask, and
+// only with a custom header: a web page cannot send one cross-origin without a CORS preflight, which
+// is never granted. The Host check also stops a page that rebinds its domain to 127.0.0.1.
+const onQuit = options.onQuit || (() => process.exit(0));
+app.post('/api/quit', ownerOnly('quit'), (req, res) => {
+  res.json({ ok: true });
+  res.on('finish', () => setTimeout(onQuit, 50));
 });
 
 // FBNeo searches BIOS ZIPs alongside the ROM, at the virtual filesystem root.
@@ -521,21 +999,43 @@ wss.on('connection', ws => {
       if (party.host && party.host !== ws) { party.host.partyRole = null; send(party.host, { t: 'replaced' }); }
       party.host = ws; ws.partyRole = 'host';
       party.game = { system, rom, core, name: gameInfo(sys, rom).name };
-      send(ws, { t: 'hosting', guest: !!party.guest, name: party.game.name });
-      send(party.guest, { t: 'game', game: party.game });
-      if (party.guest) send(ws, { t: 'peer' });
+      send(ws, { t: 'hosting', guest: guestSlots().length > 0, slots: guestSlots(), name: party.game.name });
+      party.guests.forEach((guest, slot) => {
+        if (!guest) return;
+        send(guest, { t: 'game', game: party.game, player: slot + 2 });
+        send(ws, { t: 'peer', slot });
+      });
       return;
     }
     if (m.t === 'guest') {
-      // One guest: a new tab (or a reload) takes the place of the old one.
-      if (party.guest && party.guest !== ws) { party.guest.partyRole = null; send(party.guest, { t: 'replaced' }); }
-      party.guest = ws; ws.partyRole = 'guest';
-      send(ws, { t: 'game', game: party.host ? party.game : null });
-      if (party.host) send(party.host, { t: 'peer' });
+      if (ws.partyRole === 'host') return;
+      // The id is the seat: a reload or a network switch comes back as the same player.
+      // Absent (an old page): a fresh one every time, so it just takes a free seat.
+      if (m.id !== undefined && !(typeof m.id === 'string' && /^[\w-]{1,64}$/.test(m.id))) return send(ws, { t: 'error', msg: 'Identificador inválido' });
+      const id = m.id || crypto.randomUUID();
+      if (ws.partyRole === 'guest' && ws.guestId !== id) leaveParty(ws);
+      let slot = party.guests.findIndex(g => g?.guestId === id);
+      if (slot < 0) slot = party.held.findIndex((h, i) => h && h.id === id && !party.guests[i]);
+      if (slot < 0) {
+        // A seat someone just dropped from is kept for them a few seconds (4G switch): used last.
+        const now = Date.now();
+        slot = party.guests.findIndex((g, i) => !g && !(party.held[i] && party.held[i].until > now));
+        if (slot < 0) slot = party.guests.findIndex(g => !g);
+        if (slot < 0) return send(ws, { t: 'full' });
+      }
+      const old = party.guests[slot];
+      if (old && old !== ws) { old.partyRole = null; send(old, { t: 'replaced' }); }
+      party.guests[slot] = ws; party.held[slot] = null;
+      ws.partyRole = 'guest'; ws.guestId = id; ws.slot = slot;
+      send(ws, { t: 'game', game: party.host ? party.game : null, player: slot + 2 });
+      send(party.host, { t: 'peer', slot });
       return;
     }
+    // Signals are routed by seat and the sender is filled in here, never taken from the message:
+    // a guest only talks to the host and cannot pose as another seat.
     if (ws.partyRole && m.t === 'signal' && m.data) {
-      return send(ws.partyRole === 'host' ? party.guest : party.host, { t: 'signal', data: m.data });
+      if (ws.partyRole === 'guest') return send(party.host, { t: 'signal', from: ws.slot, data: m.data });
+      return send(Number.isInteger(m.to) ? party.guests[m.to] : null, { t: 'signal', data: m.data });
     }
     if (m.t === 'create') {
       if (ws.room) return send(ws, { t: 'error', msg: 'Ya estás en una sala' });
@@ -589,31 +1089,36 @@ wss.on('connection', ws => {
   });
   ws.on('close', () => { leaveParty(ws); leave(ws); });
 });
-// The party: one permanent link for the guest, whatever game the host opens.
-const party = { host: null, guest: null, game: null };
+// The party: one permanent link, up to 3 guests (P2-P4, seats 0-2), whatever game the host opens.
+const party = { host: null, guests: [null, null, null], held: [null, null, null], game: null };
+const guestSlots = () => party.guests.flatMap((g, slot) => g ? [slot] : []);
 function leaveParty(ws) {
   if (ws.partyRole === 'host' && party.host === ws) {
     party.host = null;
-    send(party.guest, { t: 'host-left' });
-  } else if (ws.partyRole === 'guest' && party.guest === ws) {
-    party.guest = null;
-    send(party.host, { t: 'peer-left' });
+    for (const guest of party.guests) send(guest, { t: 'host-left' });
+  } else if (ws.partyRole === 'guest' && party.guests[ws.slot] === ws) {
+    party.guests[ws.slot] = null;
+    party.held[ws.slot] = { id: ws.guestId, until: Date.now() + 15000 };
+    send(party.host, { t: 'peer-left', slot: ws.slot });
   }
   ws.partyRole = null;
 }
 app.get('/api/party', (req, res) => {
-  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: !!party.guest, hosting: !!party.host, game: party.host ? party.game : null });
+  const slots = guestSlots();
+  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: slots.length > 0, guests: slots.length, slots, players: slots.map(s => s + 2), hosting: !!party.host, game: party.host ? party.game : null });
 });
 async function close() {
   for (const ws of wss.clients) ws.terminate();
   wss.close();
   await new Promise(resolve => netplay.io.close(resolve));
   if (server.listening) await new Promise(resolve => server.close(resolve));
+  lrAbort.abort();
+  await Promise.all([...lrBusy.values()]);
   try { if (lbDb) lbDb.close(); } catch (e) {}
   lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
-return Object.assign(game, { app, server, wss, rooms, netplay, close, lanUrls });
+return Object.assign(game, { app, server, wss, rooms, party, netplay, close, lanUrls,coversReady: () => Promise.all([...lrBusy.values()]) });
 }
 // Opens an ngrok tunnel (unless --no-share) so guests outside the home network can join.
 // Only pages and signaling go through it; video and controls travel over WebRTC.
@@ -639,25 +1144,54 @@ function startTunnel(game, port) {
 function openBrowser(url) {
   require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
 }
+// The RemoteGame answering on this port (its /api/info), or null if it is some other program.
+async function runningInstance(port) {
+  try {
+    const info = await (await fetch('http://127.0.0.1:' + port + '/api/info', { signal: AbortSignal.timeout(2000) })).json();
+    return info && info.version && Array.isArray(info.lanUrls) ? info : null;
+  } catch (e) { return null; }
+}
+async function askToQuit(port) {
+  try { return (await fetch('http://127.0.0.1:' + port + '/api/quit', { method: 'POST', headers: { 'X-RemoteGame': 'quit' }, signal: AbortSignal.timeout(3000) })).status; } catch (e) { return 0; }
+}
 if (require.main === module) {
   const game = createRemoteGame();
   const port = Number(process.env.PORT || cfg.port);
   // --open (desktop shortcut, pnpm start): show the library in the browser.
   const open = process.argv.includes('--open');
   if (open) process.title = 'RemoteGame';
-  game.server.on('error', err => {
+  const show = () => { if (open) openBrowser('http://localhost:' + port); setTimeout(() => process.exit(0), 3000); };
+  let replaced = false, deadline = 0;
+  const listen = () => game.server.listen(port);
+  // The port is taken. Another RemoteGame with different code (an update) is asked to quit and this one
+  // takes its place; one with the same code keeps serving (a game in progress is not cut off).
+  game.server.on('error', async err => {
     if (err.code !== 'EADDRINUSE') throw err;
-    // Double-clicked twice: the first one is already serving, just show it.
-    console.log('RemoteGame ya está abierto. Abriendo el navegador…');
-    if (open) openBrowser('http://localhost:' + port);
-    setTimeout(() => process.exit(0), 3000);
+    if (deadline) {   // waiting for the old one to let go of the port
+      if (Date.now() < deadline) return void setTimeout(listen, 250);
+      console.log('La versión anterior de RemoteGame no se cerró: cerrá su ventana y volvé a abrir el acceso directo.');
+      return show();
+    }
+    const old = await runningInstance(port);
+    if (!old) { console.log('El puerto ' + port + ' lo usa otro programa: cerralo o elegí otro con PORT.'); return void setTimeout(() => process.exit(1), 3000); }
+    if (old.build === BUILD) { console.log('RemoteGame ya está abierto. Abriendo el navegador…'); return show(); }
+    console.log('Hay una versión anterior de RemoteGame abierta. Reemplazándola…');
+    if (await askToQuit(port) !== 200) {
+      // Versions before this one cannot be asked (no /api/quit): only their own window can close them.
+      console.log('Hay una versión vieja de RemoteGame abierta: cerrá su ventana y volvé a abrir el acceso directo.');
+      return show();
+    }
+    replaced = true; deadline = Date.now() + 10000;
+    setTimeout(listen, 300);
   });
-  game.server.listen(port, () => {
+  game.server.once('listening', () => {
     console.log('RemoteGame v0.5.0 en http://localhost:' + port);
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
-    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0') startTunnel(game, port);
+    // After a replacement, give ngrok a moment to notice the old tunnel is gone (the free plan allows one).
+    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0') setTimeout(() => startTunnel(game, port), replaced ? 2500 : 0);
     if (open) openBrowser('http://localhost:' + port);
     if (open) console.log('Cerrá esta ventana para apagar RemoteGame.');
   });
+  listen();
 }
 module.exports = { createRemoteGame };

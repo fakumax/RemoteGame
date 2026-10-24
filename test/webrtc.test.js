@@ -71,3 +71,26 @@ test('RemoteWebRTC: a channel received already open still reports onOpen once', 
   assert.equal(opens, 1);
   rtc.close();
 });
+
+test('RemoteWebRTC: one host feeds the same video and audio tracks to several guests', async () => {
+  const sender = () => ({ track: null, params: { encodings: [] }, async replaceTrack(t) { this.track = t; }, getParameters() { return this.params; }, async setParameters(p) { this.params = p; } });
+  const guests = [0, 1, 2].map(() => {
+    const rtc = new RemoteWebRTC({ isHost: true, media: true });
+    rtc.pc = {}; rtc.videoSender = sender(); rtc.audioSender = sender();
+    return rtc;
+  });
+  const video = {}, audio = {};
+  await Promise.all(guests.map(g => g.setTracks(video, audio, 3)));
+  for (const g of guests) {
+    assert.equal(g.videoSender.track, video);
+    assert.equal(g.audioSender.track, audio);
+    assert.equal(g.videoSender.params.encodings[0].scaleResolutionDownBy, 3);
+  }
+  // Closing one guest leaves the others streaming, and a closed one ignores later track swaps.
+  guests[1].close();
+  await Promise.all(guests.map(g => g.setTracks({}, {}, 1)));
+  assert.notEqual(guests[0].videoSender.track, video);
+  assert.equal(guests[1].videoSender, null);
+  assert.equal(guests[2].videoSender.params.encodings[0].scaleResolutionDownBy, 1);
+  guests.forEach(g => g.close());
+});

@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="/style.css">
 <script src="/share.js"></script>
 <style>
-main.wide{max-width:1280px}
+main.wide{max-width:1560px}
 .party{margin-top:2px}
 .party summary{cursor:pointer;font-size:13px;color:var(--mut);padding:6px 0;user-select:none}
 .party summary b{color:var(--txt);margin-left:4px}
@@ -23,26 +23,32 @@ main.wide{max-width:1280px}
 .sys .n{font-size:12px;color:var(--mut)}
 .sys.on .n{color:#08122bbb}
 .sys:disabled{opacity:.4;cursor:default}
-.bar input{width:100%;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:15px}
+.bar{display:flex;gap:8px}
+.bar input{flex:1;min-width:0;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:15px}
 .bar input:focus{outline:2px solid var(--acc);outline-offset:1px}
+.gear{flex:none;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:0 14px;font-size:17px;cursor:pointer}
+.gear:hover{border-color:var(--acc)}
 .count{margin:14px 2px 10px;font-size:14px;color:var(--mut)}
-.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px}
+.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
 .shelf.busy{opacity:.55;transition:opacity .15s}
 .game{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;transition:border-color .15s,transform .15s}
 .game:hover{border-color:var(--acc);transform:translateY(-2px)}
-.art{position:relative;display:block;aspect-ratio:3/4;overflow:hidden;background:linear-gradient(160deg,hsl(var(--h) 45% 26%),hsl(var(--h) 40% 11%))}
+.art{position:relative;display:block;aspect-ratio:1/1;overflow:hidden;background:linear-gradient(160deg,hsl(var(--h) 45% 26%),hsl(var(--h) 40% 11%))}
 .art .ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:10px;text-align:center}
-.art .ph b{font-size:58px;line-height:1;color:#ffffffd9}
+.art .ph b{font-size:40px;line-height:1;color:#ffffffd9}
 .art .ph span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#ffffffb3}
 .art img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .25s}
 .art img.ready{opacity:1}
-.art img.fill{object-fit:cover}
 .art.has .ph{visibility:hidden}
-.art.wide::before{content:"";position:absolute;inset:-24px;background:var(--img) center/cover;filter:blur(16px) brightness(.45)}
-.info{padding:10px 10px 2px;flex:1}
-.info h3{margin:0;font-size:14px;line-height:1.3;min-height:2.6em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.info .meta{margin-top:3px;min-height:1.3em;font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.go{display:block;margin:6px 10px 10px;padding:9px;text-align:center;background:var(--acc);color:#08122b;font-weight:700;font-size:14px;border-radius:8px;text-decoration:none}
+.art.has::before{content:"";position:absolute;inset:-24px;background:var(--img) center/cover;filter:blur(16px) brightness(.45)}
+.game.bad{opacity:.6}
+.game.bad .art img{filter:grayscale(.7)}
+.badge{position:absolute;top:6px;left:6px;z-index:2;background:#000c;color:#ffcf7a;font-size:10px;font-weight:700;letter-spacing:.03em;padding:2px 7px;border-radius:10px}
+.info{padding:8px 9px 0;flex:1}
+.info h3{margin:0;font-size:13px;line-height:1.25;min-height:2.5em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.info .meta{margin-top:2px;min-height:1.2em;font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.go{display:block;margin:6px 9px 9px;padding:6px;text-align:center;background:var(--acc);color:#08122b;font-weight:700;font-size:13px;border-radius:7px;text-decoration:none}
+.game.bad .go{background:#2a3050;color:var(--txt);font-weight:600}
 .go:hover{filter:brightness(1.1)}
 .more{display:block;margin:18px auto 0;padding:10px 22px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:20px;cursor:pointer;font-size:14px}
 .more[hidden]{display:none}
@@ -52,6 +58,19 @@ main.wide{max-width:1280px}
 .others h2 span{color:var(--mut);font-weight:400;font-size:14px}
 .empty{grid-column:1/-1;padding:28px 16px;text-align:center;color:var(--mut);background:var(--card);border:1px dashed var(--line);border-radius:12px}
 .empty b{color:var(--txt)}
+.setup{margin-top:10px;padding:22px 24px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+.setup[hidden],.shelf[hidden],.count[hidden]{display:none}
+.setup h2{margin:0 0 6px;font-size:20px}
+.setup p{margin:0 0 14px;color:var(--mut);font-size:14px;line-height:1.5}
+.setup .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.setup input{flex:1;min-width:220px;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:11px 13px;font-size:14px}
+.setup button{background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:10px 16px;cursor:pointer;font-size:14px}
+.setup button.main{background:var(--acc);color:#08122b;font-weight:700;border-color:transparent}
+.setup button:disabled{opacity:.45;cursor:default}
+.setup ul{list-style:none;margin:14px 0 0;padding:0;font-size:13px;display:grid;gap:4px}
+.setup li{color:var(--mut)}
+.setup li.ok{color:var(--txt)}
+.setup li b{display:inline-block;min-width:120px}
 .upload{margin-top:30px;font-size:13px;color:var(--mut)}
 .upload summary{cursor:pointer;user-select:none}
 .upload .row{margin-top:8px}
@@ -65,7 +84,7 @@ main.wide{max-width:1280px}
   .side h2{display:none}
   .sys{width:auto;flex:0 0 auto;white-space:nowrap;border:1px solid var(--line);border-radius:20px;padding:7px 12px}
   .shelf{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-  .art .ph b{font-size:46px}
+  .art .ph b{font-size:34px}
 }
 </style>
 </head>
@@ -85,7 +104,14 @@ main.wide{max-width:1280px}
   <div class="lib">
     <nav class="side" id="side" aria-label="Consolas"><h2>Consolas</h2></nav>
     <section>
-      <div class="bar"><input type="search" id="q" placeholder="🔍 Buscá un juego (mario, sonic, metal slug…)" autocomplete="off" aria-label="Buscar juego"></div>
+      <div class="bar"><input type="search" id="q" placeholder="🔍 Buscá un juego (mario, sonic, metal slug…)" autocomplete="off" aria-label="Buscar juego"><button class="gear" id="gear" title="Carpeta de juegos" aria-label="Carpeta de juegos">⚙️</button></div>
+      <div class="setup" id="setup" hidden>
+        <h2 id="setupTitle">¿Dónde están tus juegos?</h2>
+        <p>Elegí la carpeta que tiene las de cada consola (NES, Super Nintendo, Genesis, Nintendo 64, Arcade…). Las busco solas, hasta tres niveles adentro. Tus ROMs no se tocan.</p>
+        <div class="row"><input id="setupPath" placeholder="Ej: D:\Juegos" autocomplete="off" spellcheck="false" aria-label="Ruta de la carpeta de juegos"><button id="setupPick" class="main">Buscar carpeta…</button><button id="setupScan">Revisar</button></div>
+        <ul id="setupFound"></ul>
+        <div class="row"><button id="setupSave" class="main" disabled>Guardar</button><button id="setupCancel">Cancelar</button><span class="mut" id="setupMsg"></span></div>
+      </div>
       <div class="count" id="count" aria-live="polite"></div>
       <div id="games" class="shelf"></div>
       <button class="more" id="more" hidden>Ver más</button>
@@ -102,7 +128,7 @@ main.wide{max-width:1280px}
           <span class="mut" id="upMsg"></span>
         </div>
       </details>
-      <div class="foot">Tu carpeta de juegos solo se lee, nunca se modifica. Las portadas vienen de LaunchBox.</div>
+      <div class="foot">Tus ROMs nunca se tocan. Las portadas vienen de libretro-thumbnails y, si tenés LaunchBox, también de ahí; si ponés una imagen con el mismo nombre del juego en la subcarpeta <b>covers</b> de su consola, se usa esa.</div>
     </section>
   </div>
 </main>
@@ -110,7 +136,8 @@ main.wide{max-width:1280px}
 var PAGE=96, KEY='remotegame.library';
 var HUE={nes:355,genesis:235,arcade:35,snes:275,n64:150,subidos:200};
 var systems=[], labels={}, sys='all', query='';
-var seq=0, ctl=null, timer=null;
+var seq=0, ctl=null, timer=null, stale=false;
+var STALE='RemoteGame se actualizó: cerrá la ventana de RemoteGame y volvé a abrirlo.';
 var lists={main:null,other:null};   // loaded games and total per section
 var restore=null;
 function $(id){return document.getElementById(id);}
@@ -150,7 +177,8 @@ function pick(id){
 }
 
 function card(g,showSys){
-  var d=document.createElement('article'); d.className='game';
+  var d=document.createElement('article'); d.className='game'+(g.compat===false?' bad':'');
+  if(g.compat===false)d.title='No compatible: '+g.reason;
   var art=document.createElement('a'); art.className='art'; art.href=g.play; art.tabIndex=-1; art.setAttribute('aria-hidden','true');
   art.style.setProperty('--h',HUE[g.system]!=null?HUE[g.system]:210);
   var ph=document.createElement('div'); ph.className='ph';
@@ -160,9 +188,8 @@ function card(g,showSys){
   if(g.cover){
     var img=document.createElement('img'); img.alt=''; img.loading='lazy'; img.decoding='async';
     img.onload=function(){
-      var r=img.naturalWidth/img.naturalHeight;
-      if(r>0.6&&r<0.92)img.classList.add('fill');   // box art fills the frame; wide shots stay whole over a blurred copy
-      else{art.style.setProperty('--img','url("'+g.cover+'")');art.classList.add('wide');}
+      // the whole picture, over a blurred copy of itself that fills the frame
+      art.style.setProperty('--img','url("'+g.cover+'")');
       img.classList.add('ready'); art.classList.add('has');
     };
     img.onerror=function(){img.remove();};
@@ -173,19 +200,27 @@ function card(g,showSys){
   var meta=document.createElement('div'); meta.className='meta';
   meta.textContent=[g.year,showSys?g.systemLabel:'',g.variant].filter(Boolean).join(' · ');
   info.append(h,meta);
-  var go=document.createElement('a'); go.className='go'; go.href=g.play; go.textContent='▶ Jugar';
-  go.setAttribute('aria-label','Jugar '+g.name);
+  var go=document.createElement('a'); go.className='go'; go.href=g.play; go.textContent=g.compat===false?'Probar igual':'▶ Jugar';
+  go.setAttribute('aria-label',(g.compat===false?'Probar igual ':'Jugar ')+g.name);
+  if(g.compat===false){var bd=document.createElement('span'); bd.className='badge'; bd.textContent='No compatible'; art.appendChild(bd); go.title=g.reason;}
   d.append(art,info,go);
   return d;
 }
 
 function fetchList(system,offset,limit,not,signal){
   var url='/api/games?system='+encodeURIComponent(system)+'&q='+encodeURIComponent(query)+'&limit='+limit+'&offset='+offset+(not?'&not='+encodeURIComponent(not):'');
-  return fetch(url,{signal:signal}).then(function(x){if(!x.ok)throw new Error('HTTP '+x.status);return x.json();});
+  return fetch(url,{signal:signal,priority:'high'}).then(function(x){
+    if(!x.ok){var e=new Error('HTTP '+x.status); e.status=x.status; throw e;}
+    return x.json();
+  });
 }
 function fill(kind,r,reset){
   var box=$(kind==='main'?'games':'otherGames'), more=$(kind==='main'?'more':'otherMore');
-  if(reset){box.textContent='';lists[kind]={games:0,total:0};}
+  if(reset){
+    // covers still downloading would hold the browser's few connections and make searching feel stuck
+    box.querySelectorAll('img').forEach(function(i){i.onload=i.onerror=null;i.removeAttribute('src');});
+    box.textContent='';lists[kind]={games:0,total:0};
+  }
   var showSys=kind==='other'||sys==='all';
   r.games.forEach(function(g){box.appendChild(card(g,showSys));});
   lists[kind].games+=r.games.length; lists[kind].total=r.total;
@@ -210,7 +245,7 @@ async function load(){
     ]);
     if(mine!==seq)return;
     var main=rs[0],other=rs[1];
-    $('info').textContent='';
+    $('info').textContent=stale?STALE:'';
     $('games').classList.remove('busy');
     fill('main',main,true);
     $('others').hidden=!(other&&other.total>0);
@@ -235,7 +270,9 @@ async function load(){
   }catch(e){
     if(e.name==='AbortError'||mine!==seq)return;
     $('games').classList.remove('busy');
-    $('info').textContent='No pude cargar los juegos ('+e.message+'). Probá recargar la página.';
+    // a 400/404 from /api/games means the page is newer than the server that is running
+    $('games').textContent=''; $('others').hidden=true; $('more').hidden=true; $('count').textContent='';
+    $('info').textContent=(e.status===400||e.status===404||stale)?STALE:'No pude cargar los juegos ('+e.message+'). Probá recargar la página.';
   }
 }
 async function loadMore(kind){
@@ -252,14 +289,76 @@ async function loadMore(kind){
 $('more').onclick=function(){loadMore('main');};
 $('otherMore').onclick=function(){loadMore('other');};
 
+// Games folder: asks the server (only this PC may, with its own header) and shows what it found per console.
+var OWN={'X-RemoteGame':'settings'}, scanned=null;
+function api(path,body){
+  return fetch(path,{method:body?'POST':'GET',headers:Object.assign({'Content-Type':'application/json'},OWN),body:body?JSON.stringify(body):undefined})
+    .then(function(r){return r.json().catch(function(){return {};}).then(function(j){if(!r.ok||j.ok===false)throw new Error(j.msg||('HTTP '+r.status));return j;});});
+}
+function showFound(j){
+  var ul=$('setupFound'), any=false; ul.textContent='';
+  j.consoles.forEach(function(c){
+    var li=document.createElement('li'), b=document.createElement('b'); b.textContent=c.label;
+    if(c.dir){any=true; li.className='ok'; li.append(b,c.count.toLocaleString('es-AR')+' juegos en '+c.dir);}
+    else li.append(b,'no la encontré');
+    ul.appendChild(li);
+  });
+  scanned=any?j.gamesRoot:null;
+  $('setupSave').disabled=!any;
+  $('setupMsg').textContent=any?'':'No encontré ninguna consola ahí. Elegí la carpeta que contiene las de cada consola.';
+}
+function scanPath(){
+  var p=$('setupPath').value.trim();
+  if(!p){$('setupMsg').textContent='Escribí o elegí una carpeta.';return Promise.resolve();}
+  $('setupMsg').textContent='Buscando…';
+  return api('/api/settings/scan',{gamesRoot:p}).then(showFound).catch(function(e){scanned=null;$('setupSave').disabled=true;$('setupFound').textContent='';$('setupMsg').textContent=e.message;});
+}
+function openSetup(first){
+  $('setup').hidden=false; $('setupTitle').textContent=first?'¿Dónde están tus juegos?':'Carpeta de juegos';
+  $('setupCancel').hidden=!!first;
+  if(first){$('games').hidden=true; $('count').hidden=true;}
+  $('setupMsg').textContent=''; $('setupFound').textContent=''; $('setupSave').disabled=true; scanned=null;
+  api('/api/settings').then(function(j){
+    if(j.exists)$('setupPath').value=j.gamesRoot;
+    if(j.exists&&j.consoles.some(function(c){return c.dir;}))showFound(j);
+    if(j.locked)$('setupMsg').textContent='La variable GAMES_ROOT tiene prioridad sobre lo que guardes acá.';
+  }).catch(function(){});
+}
+function closeSetup(){$('setup').hidden=true; $('games').hidden=false; $('count').hidden=false;}
+$('gear').onclick=function(){if($('setup').hidden)openSetup(false);else closeSetup();};
+$('setupCancel').onclick=closeSetup;
+$('setupScan').onclick=scanPath;
+$('setupPath').addEventListener('keydown',function(e){if(e.key==='Enter')scanPath();});
+$('setupPick').onclick=function(){
+  $('setupMsg').textContent='Elegí la carpeta en la ventana que se abrió (puede quedar detrás del navegador)…';
+  $('setupPick').disabled=true;
+  api('/api/settings/pick',{}).then(function(j){
+    if(j.path){$('setupPath').value=j.path; return scanPath();}
+    $('setupMsg').textContent='';
+  }).catch(function(e){$('setupMsg').textContent=e.message;}).then(function(){$('setupPick').disabled=false;});
+};
+$('setupSave').onclick=function(){
+  if(!scanned)return;
+  $('setupSave').disabled=true; $('setupMsg').textContent='Guardando…';
+  api('/api/settings',{gamesRoot:scanned}).then(function(j){
+    if(j.locked&&j.gamesRoot!==scanned){$('setupMsg').textContent='Guardado, pero GAMES_ROOT tiene prioridad en este arranque.';return;}
+    closeSetup(); sys='all'; query=''; $('q').value=''; save(); return init();
+  }).catch(function(e){$('setupSave').disabled=false;$('setupMsg').textContent=e.message;});
+};
+
 async function init(){
+  // A server from before this page existed answers /api/info without a build: it cannot do what the page asks.
+  try{var info=await fetch('/api/info').then(function(x){return x.json();}); stale=!info.build;}catch(e){}
+  if(stale)$('info').textContent=STALE;
   var r=await fetch('/api/systems').then(function(x){return x.json();});
   systems=r.systems; labels={};
   systems.forEach(function(s){labels[s.id]=s.label;});
   var ok=sys==='all'||systems.some(function(s){return s.id===sys&&!s.missing&&s.count>0;});
   if(!ok)sys='all';
   buildSide();
-  await load();
+  // No console has games: ask where they are instead of showing an empty shelf.
+  if(!stale&&systems.every(function(s){return s.id==='subidos'||s.missing||s.count===0;})){$('games').textContent=''; $('others').hidden=true; $('more').hidden=true; $('count').textContent=''; openSetup(true); return;}
+  if($('setup').hidden)await load();
 }
 var saved=readSaved();
 if(saved){sys=saved.sys||'all'; query=saved.q||''; $('q').value=query; restore=saved;}

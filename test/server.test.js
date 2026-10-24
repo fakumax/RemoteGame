@@ -3,18 +3,43 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { once } = require('node:events');
 const { WebSocket } = require('ws');
 const { io } = require('socket.io-client');
 const AdmZip = require('adm-zip');
 const { DatabaseSync } = require('node:sqlite');
 const { createRemoteGame } = require('../server');
-let temp, game, base;
+let temp, game, base, quits = 0;
 // Covers: the download is simulated, so these tests never touch the Internet.
 const downloads = [];
 // A real 1000x1400 PNG (cover art is big), so the resize to a small WebP is exercised too.
 const sharp = require('sharp');
 const fakeCover = async name => { downloads.push(name); await new Promise(r => setTimeout(r, 20)); return sharp({ create: { width: 1000, height: 1400, channels: 3, background: '#c33' } }).png().toBuffer(); };
+// libretro-thumbnails, also simulated: `lists` maps "<library>/<type>" to the file names of its directory listing.
+const lrLog = [];
+const fakeLibretro = lists => async pathname => {
+  lrLog.push(pathname);
+  if (pathname.endsWith('/')) {
+    const [lib, type] = pathname.split('/').map(decodeURIComponent);
+    return Buffer.from((lists[lib + '/' + type] || []).map(s => '<tr><td><a href="' + encodeURIComponent(s).replace(/'/g, '%27') + '.png">' + s.replace(/&/g, '&amp;') + '.png</a></td></tr>').join('\n'));
+  }
+  await new Promise(r => setTimeout(r, 20));
+  return sharp({ create: { width: 600, height: 800, channels: 3, background: '#36c' } }).png().toBuffer();
+};
+const SNES_LIB = 'Nintendo - Super Nintendo Entertainment System';
+const sharedLists = {
+  [SNES_LIB + '/Named_Boxarts']: ['No Cover (Japan)', 'No Cover (USA)', 'No Cover (Europe)', 'No Cover (USA) (Beta)', 'Super Metroid (USA)', 'Bad Dump (USA) [b]', 'Dr. Mario - Hack (USA)'],
+  [SNES_LIB + '/Named_Titles']: ['Only Title (USA)'],
+  'FBNeo - Arcade Games/Named_Boxarts': ['Metal Slug - Super Vehicle-001']
+};
+const fakeDat = async which => which === 'fbneo' ? '<datafile><game name="mslug" sourcefile="x.cpp"><description>Metal Slug - Super Vehicle-001 (World)</description></game><game isbios="yes" name="neogeo"><description>Neo Geo</description></game></datafile>' : '<mame></mame>';
+// Another server on its own folders, for the tests that change what is on disk.
+async function instance(options) {
+  const g = createRemoteGame({ libretro: false, localRoms: path.join(temp, 'uploads'), launchBoxDir: path.join(temp, 'nothing-here'), ...options });
+  g.server.listen(0, '127.0.0.1'); await once(g.server, 'listening');
+  return { g, url: 'http://127.0.0.1:' + g.server.address().port };
+}
 const clients = [];
 before(async () => {
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'remotegame-test-'));
@@ -29,7 +54,7 @@ before(async () => {
   fs.writeFileSync(path.join(temp,'NES','Other_Game (U) [!].nes'), Buffer.from('NES\x1a'));
   // The same title in two consoles, plus SNES games that LaunchBox's metadata knows by name only.
   fs.mkdirSync(path.join(temp,'Super Nintendo','Roms'),{recursive:true});
-  for(const f of ['Other Game (E).smc','Addams Family, The (U).smc','No Cover (U).smc'])fs.writeFileSync(path.join(temp,'Super Nintendo','Roms',f), Buffer.from('smc'));
+  for(const f of ['Other Game (E).smc','Addams Family, The (U).smc','No Cover (U).smc','Nothing Here (U).smc','super metroid (u).smc','Only Title (U).smc','International Superstar Soccer (U).smc'])fs.writeFileSync(path.join(temp,'Super Nintendo','Roms',f), Buffer.from('smc'));
   // A LaunchBox list with the full title for test.nes, path relative to the LaunchBox folder.
   fs.mkdirSync(path.join(temp,'LaunchBox','Data','Platforms'),{recursive:true});
   fs.writeFileSync(path.join(temp,'LaunchBox','Data','Platforms','NES.xml'),
@@ -44,9 +69,13 @@ before(async () => {
     "INSERT INTO GameImages VALUES ('aaaa-1.png',1,'Box - Front','Japan'),('bbbb-1.jpg',1,'Box - Front','North America'),('cccc-1.jpg',1,'Screenshot - Gameplay','World'),('dddd-2.jpg',2,'Box - Front','World'),('eeee-3.png',3,'Box - Front - Reconstructed',''),('ffff-4.jpg',4,'Box - Front','World'),('../evil.jpg',3,'Box - Front','World');"+
     "INSERT INTO GameAlternateTitles VALUES ('Addams Family Values Old',3,'');");
   db.close();
-  game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'LaunchBox'),coverCacheDir:path.join(temp,'covers'),fetchCover:fakeCover });
+  fs.writeFileSync(path.join(temp,'MAME','Roms','mslug.zip'), zip.toBuffer());
+  game=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'LaunchBox'),coverCacheDir:path.join(temp,'covers'),fetchCover:fakeCover,
+    libretroCacheDir:path.join(temp,'lr'),fetchLibretro:fakeLibretro(sharedLists),fetchDat:fakeDat,settingsFile:path.join(temp,'settings.json'),onQuit:()=>quits++,coversBesideGames:true });
   game.server.listen(0,'127.0.0.1');await once(game.server,'listening');
   base='http://127.0.0.1:'+game.server.address().port;
+  // The first listing starts the download of the thumbnail listings; wait for them so every test sees the same names.
+  await fetch(base+'/api/games?system=all&limit=1');await game.coversReady();
 });
 after(async () => {
   for(const client of clients) client.close();
@@ -83,7 +112,7 @@ test('ROMs: validates files, preserves uploaded ZIPs and exposes BIOS without li
   const biosZip=Buffer.from(await (await fetch(base+'/'+bios['/neogeo.zip'])).arrayBuffer());
   assert.deepEqual(biosZip,fs.readFileSync(path.join(temp,'MAME','Roms','neogeo.zip')));
   assert.equal((await fetch(base+'/pgm.zip')).status,404);
-  const list=await (await fetch(base+'/api/games?system=arcade')).json();assert.equal(list.total,0);
+  const list=await (await fetch(base+'/api/games?system=arcade')).json();assert.deepEqual(list.games.map(g=>g.file),['mslug.zip']);
   assert.equal((await fetch(base+'/api/rom/nes/test.nes')).headers.get('cache-control'),'no-cache');
 });
 test('Names: full titles from LaunchBox, searchable by title or file; others tidied',async()=>{
@@ -116,32 +145,113 @@ test('Party: one permanent link, the guest follows every game the host opens',as
   send(host,{t:'host',system:'arcade',rom:'missing.zip',core:'fbneo'});await message(host,'error');
   send(host,{t:'host',system:'nes',rom:'test.nes',core:'../x'});await message(host,'error');
   send(host,{t:'host',system:'nes',rom:'test.nes',core:'nes'});assert.equal((await message(host,'hosting')).guest,false);
-  send(guest,{t:'guest'});assert.deepEqual((await message(guest,'game')).game,{system:'nes',rom:'test.nes',core:'nes',name:'Rock & Roll Racing'});
-  await message(host,'peer');
+  send(guest,{t:'guest',id:'ana'});const joined=await message(guest,'game');
+  assert.deepEqual(joined.game,{system:'nes',rom:'test.nes',core:'nes',name:'Rock & Roll Racing'});assert.equal(joined.player,2);
+  assert.equal((await message(host,'peer')).slot,0);
   assert.equal((await (await fetch(base+'/api/party')).json()).guest,true);
   // Someone through the tunnel cannot take the host role.
   send(guest,{t:'host',system:'nes',rom:'test.nes',core:'nes'});assert.match((await message(guest,'error')).msg,/anfitriona/);
   const sdp='v=0\r\n'+'a=x\r\n'.repeat(3000);
-  send(host,{t:'signal',data:{sdp:{type:'offer',sdp}}});assert.equal((await message(guest,'signal')).data.sdp.sdp,sdp);
-  send(guest,{t:'signal',data:{candidate:'c'}});assert.equal((await message(host,'signal')).data.candidate,'c');
+  send(host,{t:'signal',to:0,data:{sdp:{type:'offer',sdp}}});assert.equal((await message(guest,'signal')).data.sdp.sdp,sdp);
+  send(guest,{t:'signal',data:{candidate:'c'}});const back=await message(host,'signal');assert.equal(back.data.candidate,'c');assert.equal(back.from,0);
   // Opening another game: the old page is replaced and the guest switches without a new link.
   const host2=await wsClient();
   send(host2,{t:'host',system:'nes',rom:'test.nes',core:'nes'});
-  await message(host,'replaced');await message(guest,'game');await message(host2,'peer');
+  await message(host,'replaced');await message(guest,'game');assert.equal((await message(host2,'peer')).slot,0);
   host.close();await new Promise(r=>setTimeout(r,30));assert.equal(guest.queue.some(m=>m.t==='host-left'),false);
   host2.close();await message(guest,'host-left');
   assert.equal((await (await fetch(base+'/api/party')).json()).hosting,false);
   // A reload of the guest replaces the old tab; closing it tells the host.
   const host3=await wsClient();send(host3,{t:'host',system:'nes',rom:'test.nes',core:'nes'});await message(host3,'peer');
-  const guest2=await wsClient(true);send(guest2,{t:'guest'});await message(guest,'replaced');await message(host3,'peer');
-  guest2.close();await message(host3,'peer-left');
+  const guest2=await wsClient(true);send(guest2,{t:'guest',id:'ana'});await message(guest,'replaced');await message(host3,'peer');
+  guest2.close();assert.equal((await message(host3,'peer-left')).slot,0);
   host3.close();
+});
+// A dropped seat is kept for its owner for a few seconds; tests start from a clean room.
+const freshParty=async()=>{await new Promise(r=>setTimeout(r,60));game.party.held.fill(null);};
+const joinParty=async(id,remote=true)=>{const ws=await wsClient(remote);send(ws,{t:'guest',id});return ws;};
+const startHosting=async()=>{const host=await wsClient();send(host,{t:'host',system:'nes',rom:'test.nes',core:'nes'});await message(host,'hosting');return host;};
+test('Party: up to 3 guests take P2, P3 and P4; a 4th gets "full"; the same id keeps its seat',async()=>{
+  await freshParty();
+  const host=await startHosting();
+  const a=await joinParty('seat-a'),b=await joinParty('seat-b');
+  assert.equal((await message(a,'game')).player,2);assert.equal((await message(b,'game')).player,3);
+  assert.deepEqual([(await message(host,'peer')).slot,(await message(host,'peer')).slot],[0,1]);
+  const info=await (await fetch(base+'/api/party')).json();
+  assert.deepEqual([info.guest,info.guests,info.slots,info.players],[true,2,[0,1],[2,3]]);
+  const c=await joinParty('seat-c');assert.equal((await message(c,'game')).player,4);assert.equal((await message(host,'peer')).slot,2);
+  // Full: the 4th one is told so, gets no seat and the host does not hear of it.
+  const d=await joinParty('seat-d');await message(d,'full');
+  await new Promise(r=>setTimeout(r,30));
+  assert.equal(host.queue.some(m=>m.t==='peer'),false);assert.equal(d.queue.some(m=>m.t==='game'),false);
+  // A reload or a network switch: the same id gets the same seat back and the old socket is told.
+  const b2=await joinParty('seat-b');await message(b,'replaced');
+  assert.equal((await message(b2,'game')).player,3);assert.equal((await message(host,'peer')).slot,1);
+  // The old socket closing afterwards must not free the seat its replacement holds.
+  b.close();await new Promise(r=>setTimeout(r,30));
+  assert.equal(host.queue.some(m=>m.t==='peer-left'),false);
+  assert.equal((await (await fetch(base+'/api/party')).json()).guests,3);
+  // An id with odd characters is refused.
+  const bad=await joinParty('no/slash!');assert.match((await message(bad,'error')).msg,/inválido/);
+  // A new game reaches everyone with their own number, and the new host hears of every guest.
+  const host2=await wsClient();send(host2,{t:'host',system:'nes',rom:'test.nes',core:'nes'});
+  assert.deepEqual((await message(host2,'hosting')).slots,[0,1,2]);
+  assert.deepEqual([(await message(a,'game')).player,(await message(b2,'game')).player,(await message(c,'game')).player],[2,3,4]);
+  const seats=[];for(let i=0;i<3;i++)seats.push((await message(host2,'peer')).slot);
+  assert.deepEqual(seats.sort(),[0,1,2]);
+  for(const ws of [a,b2,c,d,bad,host,host2])ws.close();
+});
+test('Party: signals go by seat and the sender is the socket, never what the message claims',async()=>{
+  await freshParty();
+  const host=await startHosting();
+  const a=await joinParty('sig-a'),b=await joinParty('sig-b');
+  await message(a,'game');await message(b,'game');
+  // To a seat: only that guest hears it. A missing, bogus or empty seat reaches nobody.
+  send(host,{t:'signal',to:1,data:{n:1}});assert.equal((await message(b,'signal')).data.n,1);
+  for(const to of [undefined,-1,3,'0',1.5,2])send(host,{t:'signal',to,data:{n:2}});
+  // A guest cannot write to another guest, and the "from"/"to" it sends are ignored.
+  send(a,{t:'signal',from:1,to:1,data:{n:4}});send(b,{t:'signal',from:0,to:0,data:{n:5}});
+  const first=await message(host,'signal'),second=await message(host,'signal');
+  assert.deepEqual([first.from,first.data.n,second.from,second.data.n],[0,4,1,5]);
+  await new Promise(r=>setTimeout(r,30));
+  assert.deepEqual(a.queue.filter(m=>m.t==='signal'),[]);assert.deepEqual(b.queue.filter(m=>m.t==='signal'),[]);
+  // A guest that sends "host" is refused and stays a guest.
+  send(a,{t:'host',system:'nes',rom:'test.nes',core:'nes'});await message(a,'error');
+  assert.equal(game.party.host.partyRole,'host');assert.equal(game.party.guests[0].guestId,'sig-a');
+  for(const ws of [host,a,b])ws.close();
+});
+test('Party: a guest that leaves frees the seat and the host hears which one',async()=>{
+  await freshParty();
+  const host=await startHosting();
+  const a=await joinParty('leave-a'),b=await joinParty('leave-b');
+  await message(host,'peer');await message(host,'peer');
+  a.close();assert.equal((await message(host,'peer-left')).slot,0);
+  assert.deepEqual((await (await fetch(base+'/api/party')).json()).players,[3]);
+  // A newcomer does not take the seat just dropped (its owner may be switching networks)...
+  const c=await joinParty('leave-c');assert.equal((await message(c,'game')).player,4);
+  // ...unless nothing else is free; then the old owner finds the room full.
+  const d=await joinParty('leave-d');assert.equal((await message(d,'game')).player,2);
+  const a2=await joinParty('leave-a');await message(a2,'full');
+  // The host leaving tells every guest.
+  host.close();for(const ws of [b,c,d])await message(ws,'host-left');
+  assert.equal((await (await fetch(base+'/api/party')).json()).hosting,false);
+  assert.equal((await (await fetch(base+'/api/party')).json()).guest,true);
+  for(const ws of [a2,b,c,d])ws.close();
+});
+test('Party: the seat dropped by a network switch comes back to its id even if others joined meanwhile',async()=>{
+  await freshParty();
+  // Guests can arrive before any host: they get a seat and no game yet.
+  const a=await joinParty('back-a');const first=await message(a,'game');assert.deepEqual([first.player,first.game],[2,null]);
+  a.close();await new Promise(r=>setTimeout(r,30));
+  const b=await joinParty('back-b');assert.equal((await message(b,'game')).player,3);
+  const a2=await joinParty('back-a');assert.equal((await message(a2,'game')).player,2);
+  for(const ws of [a2,b])ws.close();
 });
 test('Party: visitors through the tunnel land on the room, this PC sees the library',async()=>{
   const remote=await fetch(base+'/',{redirect:'manual',headers:{'X-Forwarded-For':'203.0.113.9'}});
   assert.equal(remote.status,302);assert.equal(remote.headers.get('location'),'/sala');
   assert.equal((await fetch(base+'/')).status,200);
-  assert.match(await (await fetch(base+'/sala')).text(),/P2 · invitado/);
+  assert.match(await (await fetch(base+'/sala')).text(),/invitado/);
   const upload=await fetch(base+'/api/upload',{method:'POST',headers:{'X-Forwarded-For':'203.0.113.9'}});assert.equal(upload.status,403);
 });
 test('Both websocket protocols coexist; EJS rejection/disconnect cannot remove another room',async()=>{
@@ -193,7 +303,7 @@ test('Search: every console at once, the same title shows once per console, page
   assert.deepEqual(paged,full);
   assert.equal((await get('/api/games?system=nes&limit=1&offset=99')).games.length,0);
   assert.equal((await fetch(base+'/api/games?system=nope')).status,400);
-  const systems=(await get('/api/systems')).systems;assert.equal(systems.find(s=>s.id==='snes').count,3);assert.notEqual(systems.find(s=>s.id==='n64').missing,null);
+  const systems=(await get('/api/systems')).systems;assert.equal(systems.find(s=>s.id==='snes').count,7);assert.notEqual(systems.find(s=>s.id==='n64').missing,null);
 });
 test('One game by system and file: same JSON as the list, 404 when missing, 400 when invalid',async()=>{
   const listed=(await (await fetch(base+'/api/games?system=snes&q=other%20game')).json()).games[0];
@@ -203,16 +313,23 @@ test('One game by system and file: same JSON as the list, 404 when missing, 400 
   assert.equal((await fetch(base+'/api/game/snes/'+'a%3Ab')).status,400);
   assert.equal((await fetch(base+'/api/game/nope/x.nes')).status,400);
 });
-test('Covers: validated, resolved from LaunchBox metadata, downloaded once and cached',async()=>{
-  const nes=(await (await fetch(base+'/api/games?system=nes&q=rock')).json()).games[0];
+test('Covers: libretro first, LaunchBox as extra; saved beside the games, downloaded once',async()=>{
+  const get=async url=>(await fetch(base+url)).json();
+  const nes=(await get('/api/games?system=nes&q=rock')).games[0];
+  // Not in libretro: LaunchBox's image, by the id of its list.
   assert.match(nes.cover,/^\/api\/cover\/nes\/.+\?v=dddd-2-400$/);
-  const snes=Object.fromEntries((await (await fetch(base+'/api/games?system=snes')).json()).games.map(g=>[g.file,g]));
-  // Preferred image: box art from North America over Japan, over any screenshot; the ROM hack with the same title never wins.
+  const snes=Object.fromEntries((await get('/api/games?system=snes')).games.map(g=>[g.file,g]));
+  // LaunchBox: box art from North America over Japan, over any screenshot; the ROM hack with the same title never wins.
   assert.match(snes['Other Game (E).smc'].cover,/\?v=bbbb-1-400$/);
   // "Addams Family, The" matches "The Addams Family" by name.
   assert.match(snes['Addams Family, The (U).smc'].cover,/\?v=eeee-3-400$/);
-  assert.equal(snes['No Cover (U).smc'].cover,null);
-  const before=downloads.length;
+  // libretro: exact title only, USA over Europe and Japan, no betas, no bracketed dumps; a title screen if there is no box.
+  assert.match(snes['No Cover (U).smc'].cover,/\?v=lr-[0-9a-f]{16}-400$/);
+  assert.match(snes['Only Title (U).smc'].cover,/\?v=lr-[0-9a-f]{16}-400$/);
+  assert.equal(snes['Nothing Here (U).smc'].cover,null);
+  // The name of the matching thumbnail tidies the file name.
+  assert.equal(snes['super metroid (u).smc'].name,'Super Metroid');
+  const beforeLb=downloads.length,beforeLr=lrLog.length;
   const [a,b]=await Promise.all([fetch(base+nes.cover),fetch(base+nes.cover)]);
   assert.equal(a.status,200);assert.equal(b.status,200);
   assert.match(a.headers.get('content-type'),/^image\/webp/);
@@ -220,24 +337,207 @@ test('Covers: validated, resolved from LaunchBox metadata, downloaded once and c
   // Stored small: WebP, 400 px wide, proportions kept; the original is not kept.
   const meta=await sharp(Buffer.from(await a.arrayBuffer())).metadata();
   assert.deepEqual([meta.format,meta.width,meta.height],['webp',400,560]);
-  assert.equal(downloads.at(-1),'dddd-2.jpg');
-  assert.equal(downloads.length-before,1);
-  assert.equal((await fetch(base+nes.cover)).status,200);assert.equal(downloads.length-before,1);
-  assert.equal(fs.existsSync(path.join(temp,'covers','dddd-2.webp')),true);
-  assert.deepEqual(fs.readdirSync(path.join(temp,'covers')).filter(f=>!f.endsWith('.webp')),[]);
-  // Rejected: unknown console, bad names, files not in the collection, consoles without covers.
+  assert.equal(downloads.at(-1),'dddd-2.jpg');assert.equal(downloads.length-beforeLb,1);
+  assert.equal((await fetch(base+nes.cover)).status,200);assert.equal(downloads.length-beforeLb,1);
+  // Saved next to the ROMs, in <console>/covers/<rom name>.webp; the project cache stays empty.
+  assert.equal(fs.existsSync(path.join(temp,'NES','covers','test.webp')),true);
+  assert.equal(fs.existsSync(path.join(temp,'covers','dddd-2.webp')),false);
+  const nc=await fetch(base+snes['No Cover (U).smc'].cover);
+  assert.equal(nc.status,200);
+  assert.equal(lrLog.at(-1),encodeURIComponent(SNES_LIB)+'/Named_Boxarts/No%20Cover%20(USA).png');assert.equal(lrLog.length-beforeLr,1);
+  assert.equal((await sharp(Buffer.from(await nc.arrayBuffer())).metadata()).width,400);
+  assert.equal(fs.existsSync(path.join(temp,'Super Nintendo','Roms','covers','No Cover (U).webp')),true);
+  assert.equal(fs.readFileSync(path.join(temp,'Super Nintendo','Roms','No Cover (U).smc'),'utf8'),'smc');
+  assert.deepEqual(fs.readdirSync(path.join(temp,'Super Nintendo','Roms','covers')).filter(f=>!f.endsWith('.webp')),[]);
+  // Next listing: the saved image is promised (version = its date), the folder is not a game, nothing is downloaded again.
+  const again=(await get('/api/games?system=snes')).games;
+  assert.match(again.find(g=>g.file==='No Cover (U).smc').cover,/\?v=l\d+-400$/);
+  assert.equal(again.some(g=>/covers/i.test(g.file)),false);
+  assert.equal((await fetch(base+again.find(g=>g.file==='No Cover (U).smc').cover)).status,200);assert.equal(lrLog.length-beforeLr,1);
+  // Rejected: unknown console, bad names, files not in the collection, games without a cover anywhere.
   for(const url of ['/api/cover/constructor/test.nes','/api/cover/nes/foo%5Cbar.nes','/api/cover/nes/..%2Fx.nes'])assert.equal((await fetch(base+url)).status,400,url);
-  for(const url of ['/api/cover/nes/missing.nes','/api/cover/subidos/genesis.zip','/api/cover/snes/No%20Cover%20(U).smc','/api/cover/nes/secret.txt'])assert.equal((await fetch(base+url)).status,404,url);
+  for(const url of ['/api/cover/nes/missing.nes','/api/cover/subidos/genesis.zip','/api/cover/snes/Nothing%20Here%20(U).smc','/api/cover/nes/secret.txt'])assert.equal((await fetch(base+url)).status,404,url);
   // A name from the database that is not a plain image file name is never used.
   assert.equal(downloads.every(n=>/^[\w-]+\.(png|jpe?g|webp)$/.test(n)),true);
+  assert.equal(lrLog.every(p=>/^[\w%.()-]+\/(Named_\w+\/([\w%.()'-]+\.png)?)?$/.test(p)),true);
 });
-test('Covers: without LaunchBox metadata everything works, with no covers',async()=>{
-  const bare=createRemoteGame({ gamesRoot:temp,localRoms:path.join(temp,'uploads'),launchBoxDir:path.join(temp,'nothing-here'),coverCacheDir:path.join(temp,'covers2'),fetchCover:fakeCover });
-  bare.server.listen(0,'127.0.0.1');await once(bare.server,'listening');
+test('Arcade: the short MAME name becomes the real title (FinalBurn Neo list) and finds its thumbnail',async()=>{
+  const [g]=(await (await fetch(base+'/api/games?system=arcade')).json()).games;
+  assert.equal(g.file,'mslug.zip');assert.equal(g.name,'Metal Slug - Super Vehicle-001');
+  assert.match(g.cover,/\?v=lr-/);
+  assert.equal((await (await fetch(base+'/api/games?system=all&q=metal%20slug')).json()).total,1);
+  assert.equal((await (await fetch(base+'/api/games?system=all&q=mslug')).json()).total,1);
+});
+test('Covers: without LaunchBox nor libretro everything works, with no covers',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-bare-'));
+  fs.mkdirSync(path.join(root,'NES'));for(const f of ['x (U).nes','test.nes'])fs.writeFileSync(path.join(root,'NES',f),'NES');
+  const {g,url}=await instance({ gamesRoot:root,coverCacheDir:path.join(root,'cache'),fetchCover:fakeCover,settingsFile:path.join(root,'s2.json') });
   try{
-    const url='http://127.0.0.1:'+bare.server.address().port;
     const list=await (await fetch(url+'/api/games?system=all')).json();
-    assert.ok(list.total>=5);assert.equal(list.games.every(g=>g.cover===null),true);
+    assert.equal(list.games.filter(g=>g.system==='nes').length,2);assert.equal(list.games.every(g=>g.cover===null),true);
     assert.equal((await fetch(url+'/api/cover/nes/test.nes')).status,404);
-  }finally{await bare.close();}
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Covers: your own image beside the games wins; an unwritable folder falls back to the project cache',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-covers-'));
+  try{
+    fs.mkdirSync(path.join(root,'NES','covers'),{recursive:true});
+    for(const f of ['a (U).nes','b (U).nes'])fs.writeFileSync(path.join(root,'NES',f),'NES\x1a');
+    const own=await sharp({create:{width:120,height:90,channels:3,background:'#0a0'}}).png().toBuffer();
+    fs.writeFileSync(path.join(root,'NES','covers','a (U).png'),own);
+    // SNES: "covers" is a file, so nothing can be written there.
+    fs.mkdirSync(path.join(root,'SNES'),{recursive:true});fs.writeFileSync(path.join(root,'SNES','covers'),'x');fs.writeFileSync(path.join(root,'SNES','c (U).smc'),'smc');
+    const lists={'Nintendo - Nintendo Entertainment System/Named_Boxarts':['a (USA)','b (USA)'],[SNES_LIB+'/Named_Boxarts']:['c (USA)']};
+    const {g,url}=await instance({ gamesRoot:root,libretro:true,coversBesideGames:true,coverCacheDir:path.join(root,'cache'),libretroCacheDir:path.join(root,'lr'),fetchLibretro:fakeLibretro(lists),fetchDat:fakeDat,settingsFile:path.join(root,'s.json') });
+    try{
+      await fetch(url+'/api/games?system=all');await g.coversReady();
+      const games=Object.fromEntries((await (await fetch(url+'/api/games?system=all')).json()).games.map(x=>[x.file,x]));
+      assert.deepEqual(Object.keys(games).filter(f=>games[f].system!=='subidos').sort(),['a (U).nes','b (U).nes','c (U).smc']);
+      assert.match(games['a (U).nes'].cover,/\?v=l\d+-400$/);
+      const before=lrLog.length;
+      const mine=await fetch(url+games['a (U).nes'].cover);
+      assert.equal(mine.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await mine.arrayBuffer()),own);assert.equal(lrLog.length,before);
+      assert.equal((await fetch(url+games['b (U).nes'].cover)).status,200);
+      assert.equal(fs.existsSync(path.join(root,'NES','covers','b (U).webp')),true);
+      assert.equal((await fetch(url+games['c (U).smc'].cover)).status,200);
+      assert.equal(fs.readdirSync(path.join(root,'cache')).filter(f=>/^lr-.*\.webp$/.test(f)).length,1);
+      assert.equal(fs.readFileSync(path.join(root,'SNES','covers'),'utf8'),'x');
+    }finally{await g.close();}
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Covers: by default nothing is written in the games folder; they go to the project cache',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-nowrite-'));
+  try{
+    fs.mkdirSync(path.join(root,'NES'));fs.writeFileSync(path.join(root,'NES','zed (U).nes'),'NES\x1a');
+    const {g,url}=await instance({ gamesRoot:root,libretro:true,coverCacheDir:path.join(root,'cache'),libretroCacheDir:path.join(root,'lr'),fetchLibretro:fakeLibretro({'Nintendo - Nintendo Entertainment System/Named_Boxarts':['zed (USA)']}),fetchDat:fakeDat,settingsFile:path.join(root,'s.json') });
+    try{
+      await fetch(url+'/api/games?system=nes');await g.coversReady();
+      const a=(await (await fetch(url+'/api/games?system=nes')).json()).games[0];
+      assert.equal((await fetch(url+a.cover)).status,200);
+      assert.deepEqual(fs.readdirSync(path.join(root,'NES')),['zed (U).nes']);
+      assert.equal(fs.readdirSync(path.join(root,'cache')).filter(f=>/^lr-.*\.webp$/.test(f)).length,1);
+      assert.equal((await fetch(url+a.cover)).status,200);
+    }finally{await g.close();}
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Settings: finds each console by folder name, saves the choice, and only this PC with the header may touch it',async()=>{
+  delete process.env.GAMES_ROOT;
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-settings-'));
+  const put=(rel,names)=>{fs.mkdirSync(path.join(root,rel),{recursive:true});for(const n of names)fs.writeFileSync(path.join(root,rel,n),'x');};
+  put('Consolas/Nintendo Entertainment System/Roms',['a.nes','b.nes','c.zip']);put('Consolas/Nintendo Entertainment System',['readme.txt']);
+  put('Consolas/Super Famicom',['x.sfc']);put('Sega/Mega Drive',['g.md','h.bin']);
+  put('PlayStation/Games',['p.bin','q.bin','r.bin']);          // by extension alone this would look like Genesis
+  put('Arcade/FBNeo',['pang.zip']);put('Arcade/FBNeo/covers',['pang.png']);
+  const settingsFile=path.join(root,'settings.json'),other=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-empty-'));
+  fs.writeFileSync(settingsFile,JSON.stringify({gamesRoot:other}));
+  const {g,url}=await instance({ settingsFile });
+  const call=(p,body,headers={'X-RemoteGame':'settings'})=>fetch(url+p,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
+  try{
+    // Starts from settings.json: an empty folder has nothing.
+    let s=await (await call('/api/settings')).json();
+    assert.equal(s.gamesRoot,other);assert.deepEqual(s.consoles.filter(c=>c.dir),[]);
+    // Scanning shows what would be found, without saving.
+    const scan=await (await call('/api/settings/scan',{gamesRoot:'"'+root+'"'})).json();
+    const by=Object.fromEntries(scan.consoles.map(c=>[c.id,c]));
+    assert.equal(by.nes.dir,path.join(root,'Consolas','Nintendo Entertainment System','Roms'));assert.equal(by.nes.count,3);
+    assert.equal(by.snes.dir,path.join(root,'Consolas','Super Famicom'));
+    assert.equal(by.genesis.dir,path.join(root,'Sega','Mega Drive'));assert.equal(by.genesis.count,2);
+    assert.equal(by.arcade.dir,path.join(root,'Arcade','FBNeo'));assert.equal(by.n64.dir,null);
+    assert.equal(JSON.parse(fs.readFileSync(settingsFile,'utf8')).gamesRoot,other);
+    // Saving applies it right away and survives in settings.json.
+    s=await (await call('/api/settings',{gamesRoot:root})).json();assert.equal(s.gamesRoot,root);
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile,'utf8')),{gamesRoot:root});
+    const systems=Object.fromEntries((await (await fetch(url+'/api/systems')).json()).systems.map(x=>[x.id,x]));
+    assert.equal(systems.nes.count,3);assert.equal(systems.genesis.count,2);assert.equal(systems.arcade.count,1);assert.notEqual(systems.n64.missing,null);
+    assert.deepEqual((await (await fetch(url+'/api/games?system=arcade')).json()).games.map(x=>x.file),['pang.zip']);
+    // Rejected: no header, wrong header, from outside the PC, folders that do not exist or are files.
+    for(const [p,body] of [['/api/settings'],['/api/settings/scan',{gamesRoot:root}],['/api/settings',{gamesRoot:other}],['/api/settings/pick',{}]]){
+      assert.equal((await call(p,body,{})).status,403,p);
+      assert.equal((await call(p,body,{'X-RemoteGame':'quit'})).status,403,p);
+      assert.equal((await call(p,body,{'X-RemoteGame':'settings','X-Forwarded-For':'203.0.113.9'})).status,403,p);
+    }
+    for(const bad of [path.join(root,'nope'),path.join(root,'Sega','Mega Drive','g.md'),'',null,'a\0b'])assert.equal((await call('/api/settings',{gamesRoot:bad})).status,400);
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile,'utf8')),{gamesRoot:root});
+    // Visitors from the tunnel never see a path.
+    const remote=await (await fetch(url+'/api/systems',{headers:{'X-Forwarded-For':'203.0.113.9'}})).json();
+    assert.equal(remote.gamesRoot,undefined);assert.equal(JSON.stringify(remote).includes(root.replace(/\\/g,'\\\\')),false);
+    const info=await (await fetch(url+'/api/info',{headers:{'X-Forwarded-For':'203.0.113.9'}})).json();assert.equal(info.gamesRoot,undefined);
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});fs.rmSync(other,{recursive:true,force:true});}
+});
+test('Settings: the folder picker answers with the chosen path; the GAMES_ROOT option has priority over settings.json',async()=>{
+  const {g,url}=await instance({ gamesRoot:temp,pickFolder:async()=>'C:\\Juegos',settingsFile:path.join(temp,'s3.json') });
+  try{
+    const r=await fetch(url+'/api/settings/pick',{method:'POST',headers:{'X-RemoteGame':'settings'}});
+    assert.deepEqual(await r.json(),{ok:true,path:'C:\\Juegos'});
+    const saved=await (await fetch(url+'/api/settings',{method:'POST',headers:{'Content-Type':'application/json','X-RemoteGame':'settings'},body:JSON.stringify({gamesRoot:os.tmpdir()})})).json();
+    assert.equal(saved.locked,true);assert.equal(saved.gamesRoot,temp);
+  }finally{await g.close();}
+});
+test('Version: /api/info has a build; /api/quit needs this PC, the header and a local Host, then calls onQuit',async()=>{
+  const info=await (await fetch(base+'/api/info')).json();
+  assert.match(info.build,/^[0-9a-f]{12}$/);
+  const post=headers=>fetch(base+'/api/quit',{method:'POST',headers});
+  assert.equal((await post({})).status,403);
+  assert.equal((await post({'X-RemoteGame':'nope'})).status,403);
+  assert.equal((await post({'X-RemoteGame':'quit','X-Forwarded-For':'203.0.113.9'})).status,403);
+  // A page cannot preflight its way in: there is no CORS.
+  const pre=await fetch(base+'/api/quit',{method:'OPTIONS',headers:{Origin:'https://evil.example','Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'x-remotegame'}});
+  assert.equal(pre.headers.get('access-control-allow-origin'),null);
+  await new Promise(r=>setTimeout(r,120));assert.equal(quits,0);
+  const ok=await post({'X-RemoteGame':'quit'});assert.equal(ok.status,200);assert.deepEqual(await ok.json(),{ok:true});
+  await new Promise(r=>setTimeout(r,200));assert.equal(quits,1);
+});
+test('Arcade: each ZIP is checked against the FBNeo and MAME 2003-Plus lists and gets the core that can run it, or the reason',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-arcade-'));
+  const crc=c=>zlib.crc32(Buffer.from(c)).toString(16).padStart(8,'0');
+  const rom=(n,c,extra='')=>'<rom name="'+n+'" size="1" crc="'+crc(c)+'"'+extra+'/>';
+  const fbneo='<datafile>'
+    +'<game name="okfb"><description>Ok Game (World)</description>'+rom('a.bin','A')+rom('b.bin','B')+'</game>'
+    +'<game isbios="yes" name="mybios"><description>My BIOS</description>'+rom('bios.rom','S')+'</game>'
+    +'<game name="needbios" romof="mybios"><description>Needs BIOS</description>'+rom('n.bin','N')+'</game>'
+    +'<game name="par"><description>Parent</description>'+rom('p.bin','P')+'</game>'
+    +'<game name="kid" cloneof="par" romof="par"><description>Kid</description>'+rom('p.bin','P',' merge="p.bin"')+rom('k.bin','K')+'</game>'
+    +'<game name="badver"><description>Other dump</description>'+rom('x.bin','X')+'</game>'
+    +'</datafile>';
+  const mame='<mame><game name="okmame"><description>Only MAME</description>'+rom('m.bin','M')+'</game>'
+    +'<game name="chdg"><description>Disc game</description>'+rom('c.bin','C')+'<disk name="chdg" sha1="00"/></game>'
+    +'<game name="chd5"><description>Disc v5</description>'+rom('c.bin','C')+'<disk name="chd5" sha1="00"/></game>'
+    +'<game name="chd3"><description>Disc v3</description>'+rom('c.bin','C')+'<disk name="chd3" sha1="00"/></game></mame>';
+  const zipTo=(name,files)=>{const z=new AdmZip();for(const [n,c] of Object.entries(files))z.addFile(n,Buffer.from(c));z.writeZip(path.join(root,'MAME',name+'.zip'));};
+  fs.mkdirSync(path.join(root,'MAME'),{recursive:true});
+  zipTo('okfb',{'a.bin':'A','b.bin':'B'});zipTo('okmame',{'m.bin':'M'});zipTo('chdg',{'c.bin':'C'});zipTo('chd5',{'c.bin':'C'});zipTo('chd3',{'c.bin':'C'});
+  // CHD files: only the header matters (magic and big-endian version at byte 12)
+  for(const [name,version] of [['chd5',5],['chd3',3]]){const head=Buffer.alloc(124);head.write('MComprHD',0,'latin1');head.writeUInt32BE(version,12);fs.mkdirSync(path.join(root,'MAME',name));fs.writeFileSync(path.join(root,'MAME',name,name+'.chd'),head);}zipTo('needbios',{'n.bin':'N'});
+  zipTo('kid',{'k.bin':'K'});zipTo('badver',{'x.bin':'Y'});zipTo('unknown',{'z.bin':'Z'});
+  const {g,url}=await instance({ gamesRoot:root,libretro:true,libretroCacheDir:path.join(root,'lr'),coverCacheDir:path.join(root,'cache'),fetchLibretro:fakeLibretro({}),fetchDat:async which=>which==='fbneo'?fbneo:mame,settingsFile:path.join(root,'s.json') });
+  try{
+    const list=async()=>Object.fromEntries((await (await fetch(url+'/api/games?system=arcade')).json()).games.map(x=>[x.file,x]));
+    await list();await g.coversReady();
+    let games=await list();
+    assert.equal(games['okfb.zip'].play,'/play-ejs.html?system=arcade&file=okfb.zip&core=fbneo');assert.equal(games['okfb.zip'].compat,undefined);
+    assert.match(games['okmame.zip'].play,/&core=mame2003_plus$/);
+    const bad=f=>{assert.equal(games[f].compat,false,f);assert.doesNotMatch(games[f].play,/core=/);return games[f].reason;};
+    assert.equal(bad('chdg.zip'),'Falta el disco CHD (chdg\\chdg.chd)');
+    assert.equal(bad('chd5.zip'),'Necesita su disco CHD en versión 3; el tuyo es v5 (MAME moderno), que el emulador del navegador todavía no lee');
+    assert.equal(bad('chd3.zip'),'Necesita disco CHD: todavía no soportado');
+    assert.equal(bad('needbios.zip'),'Falta el BIOS mybios.zip');
+    assert.equal(bad('kid.zip'),'Falta el juego padre par.zip');
+    assert.equal(bad('badver.zip'),'Versión de ROMs distinta');
+    assert.equal(bad('unknown.zip'),'No está en FBNeo ni en MAME 2003-Plus');
+    // Names still come from the list; the same JSON is behind /api/game (the player page shows the reason).
+    assert.equal(games['okfb.zip'].name,'Ok Game');
+    const one=await (await fetch(url+'/api/game/arcade/kid.zip')).json();assert.deepEqual([one.compat,one.reason],[false,'Falta el juego padre par.zip']);
+    // The parent shows up: the clone now runs, without restarting.
+    zipTo('par',{'p.bin':'P'});
+    games=await list();
+    assert.match(games['kid.zip'].play,/&core=fbneo$/);assert.equal(games['kid.zip'].compat,undefined);
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Search: Spanish spelling finds the English title; no result says so',async()=>{
+  const get=async url=>(await fetch(base+url)).json();
+  for(const q of ['internacional','internac','internationa','internacional soccer','INTERNACIONAL super'])assert.deepEqual((await get('/api/games?system=snes&q='+encodeURIComponent(q))).games.map(g=>g.name),['International Superstar Soccer'],q);
+  assert.equal((await get('/api/games?system=all&q=internacional')).total,1);
+  // No stray hits: -cion only appears for a real "-tion" word.
+  for(const q of ['internacionales','mundial'])assert.equal((await get('/api/games?system=all&q='+q)).total,0,q);
+  assert.equal((await get('/api/games?system=snes&q=zzzz')).total,0);
 });
