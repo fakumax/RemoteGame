@@ -24,15 +24,12 @@
 .peer{display:flex;gap:10px;align-items:baseline}.peer b{min-width:2ch}.peer span{white-space:nowrap}
 .warn{color:var(--warn)}.bad{color:#ff5d5d}
 .field{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mut)}
-.field input,.field select{width:100%;padding:8px;font-size:14px;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:8px}
+.field input{width:100%;padding:8px;font-size:14px;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:8px}
 #capture{display:flex;flex-direction:column;gap:8px}
 #pick{padding:11px;font-size:15px;font-weight:700;background:var(--acc);color:#08122b;border:0;border-radius:8px;cursor:pointer}
 #pick:hover{filter:brightness(1.1)}
-#capinfo,#noaudio,#vpad{font-size:13px;line-height:1.5}#capinfo:empty{display:none}
-#vpad div{display:flex;gap:8px}#vpad span:first-child{color:var(--mut);min-width:9ch}
-#steps{border-color:var(--acc)}
-.steps{margin:0;padding-left:1.4em;font-size:16px;line-height:1.45}.steps li{margin:6px 0}.steps b{color:var(--acc)}
-#stepnote{margin:8px 0 0;font-size:13px;line-height:1.5;color:var(--mut)}#stepnote[hidden]{display:none}#stepnote a{color:var(--acc)}
+#capinfo,#noaudio{font-size:13px;line-height:1.5}#capinfo:empty{display:none}
+#padwarn{font-size:13px;line-height:1.5;color:var(--warn);white-space:pre-line}#padwarn:empty{display:none}
 #helpbox summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
 #help p{margin:0 0 6px}
 @media (min-width:900px){
@@ -51,18 +48,10 @@
 </head>
 <body>
 <div id="app">
-  <div id="stage"><div id="fsbox"><video id="preview" muted autoplay playsinline></video><div id="idle">Acá ves lo que transmitís.<br>Elegí la ventana del emulador o toda la pantalla.</div></div></div>
+  <div id="stage"><div id="fsbox"><video id="preview" muted autoplay playsinline></video><div id="idle">Acá ves lo que transmitís.<br>Elegí la ventana del emulador o toda la pantalla (con audio).</div></div></div>
   <aside id="side">
     <div id="head"><a href="/">← RemoteGame</a><span class="pill p1">Transmisión · vos sos P1</span></div>
     <h1 id="title">📺 Transmitir un emulador</h1>
-    <div class="panel" id="steps" hidden>
-      <ol class="steps">
-        <li>Esperá que abra <b id="emu">el emulador</b>.</li>
-        <li>Tocá <b>Elegir ventana o pantalla</b> y elegí la ventana del juego (o la pantalla completa, con audio).</li>
-        <li>Volvé al juego y jugá.</li>
-      </ol>
-      <p id="stepnote" hidden></p>
-    </div>
     <div class="panel">
       <div id="links"></div>
       <div id="peers"></div>
@@ -73,13 +62,12 @@
       <button id="pick">Elegir ventana o pantalla</button>
       <div id="capinfo"></div>
       <div id="noaudio" class="warn" hidden>🔇 Para que tus amigos escuchen, compartí la pantalla completa y marcá "Compartir audio del sistema".</div>
-      <label class="field">Calidad del video<select id="mbps"><option value="8">Normal · 8 Mbps</option><option value="15" selected>Alta · 15 Mbps</option><option value="25">Máxima · 25 Mbps</option></select></label>
     </div>
-    <div class="panel" id="vpadbox" hidden><b style="font-size:13px">Mandos virtuales</b><div id="vpad"></div></div>
+    <div id="padwarn" role="alert"></div>
     <details id="helpbox"><summary>Ayuda</summary><div class="kbd" id="help">
       <p><b>P1 sos vos:</b> jugás con tu mando directo en el emulador, sin pasar por RemoteGame. Tus amigos son P2, P3 y P4: sus botones llegan a esta PC como mandos virtuales.</p>
       <p><b>Switch (Eden):</b> poné P2–P4 como "mando UDP", pads 1–3.</p>
-      <p><b>MAME:</b> agregá <kbd>-keyboardprovider win32</kbd> al abrirlo.</p>
+      <p><b>MAME:</b> RemoteGame ya lo abre con <kbd>-keyboardprovider win32</kbd>; si lo abrís vos, agregalo.</p>
       <p>Dejá el emulador al frente: esta pestaña puede quedar detrás, pero no la cierres. Los detalles están en el README, en "Transmitir un emulador de la PC".</p>
     </div></details>
   </aside>
@@ -87,31 +75,16 @@
 <script>
 (function(){
   const $=id=>document.getElementById(id);
-  const DEFAULT='Juego de la PC', NAME_KEY='remotegame-stream-name', MBPS_KEY='remotegame-stream-mbps';
+  const DEFAULT='Juego de la PC', NAME_KEY='remotegame-stream-name', MBPS=15;   // 15 Mbps per guest, 1080p60
   let host=null, starting=null, stream=null, video=null, audio=null;
   const store={get(k){try{return localStorage.getItem(k);}catch(e){return null;}},set(k,v){try{localStorage.setItem(k,v);}catch(e){}}};
-  const preview=$('preview'), gname=$('gname'), mbps=$('mbps');
+  const preview=$('preview'), gname=$('gname');
   gname.value=store.get(NAME_KEY)||'';
-  // Arriving from the library ("Jugar en la PC"): ?name= is the game, ?from= the console it was opened for.
-  const qs=new URLSearchParams(location.search), from=qs.get('from');
+  // ?auto=1: opened by RemoteGame in its own browser window (started with flags that skip the picker): it captures by itself.
+  // ?name= is the game.
+  const qs=new URLSearchParams(location.search), auto=qs.get('auto')==='1';
   const pre=(qs.get('name')||'').replace(/\s+/g,' ').trim().slice(0,60);
   if(pre)gname.value=pre;
-  const README='https://github.com/fakumax/RemoteGame#';
-  const NOTES={
-    switch:{emu:'Eden',text:'Configuración de una sola vez en Eden: Emulación → Configurar → Controles → Avanzado, tildá "Habilitar mandos UDP" y poné Jugador 2, 3 y 4 como "UDP Controller" 1, 2 y 3. ',link:'eden-switch-1'},
-    arcade:{emu:'MAME',text:'El teclado simulado para P2–P4 ya va activado desde la línea de comando. Las teclas que MAME no trae se asignan una sola vez desde el propio MAME (Tab → Input Settings). ',link:'mame-suelto-arcades'}
-  };
-  if(pre||NOTES[from]){
-    const n=NOTES[from];
-    $('steps').hidden=false;
-    if(n){
-      $('emu').textContent=n.emu;
-      const note=$('stepnote'),a=document.createElement('a');
-      a.href=README+n.link;a.target='_blank';a.rel='noopener';a.textContent='Ver cómo en el README';
-      note.append(n.text,a,'.');note.hidden=false;
-    }
-  }
-  if([...mbps.options].some(o=>o.value===store.get(MBPS_KEY)))mbps.value=store.get(MBPS_KEY);
   // The banner (links and who is in) is there from the start; the room opens when something is being shared.
   RemoteShare.banner($('links'));
 
@@ -119,7 +92,7 @@
   const hello=()=>({t:'host',mode:'stream',name:name()});
   // A screen above 1080p goes out scaled down: 4K at 60 fps would drown the encoder and the upload.
   const scale=()=>{const w=video&&video.getSettings?video.getSettings().width:0;return w>1920?w/1920:1;};
-  const tracks=()=>({video,audio,scale:scale(),maxBitrate:Number(mbps.value)*1e6,codec:'h264'});
+  const tracks=()=>({video,audio,scale:scale(),maxBitrate:MBPS*1e6,codec:'h264'});
   const push=()=>{if(host)host.setTracks();};
 
   function connect(){
@@ -162,61 +135,72 @@
     for(const t of stream.getTracks()){t.onended=null;t.stop();}
     stream=video=audio=null;
   }
+  let failure=null, picking=false;
+  // true when something is being shared; false (and `failure` set) when not.
   async function pick(){
     if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia){
       $('status').textContent='Este navegador no puede capturar la pantalla. Abrí esta página en Chrome o Edge desde http://localhost:'+(location.port||80)+'.';
-      return;
+      failure='unsupported';return false;
     }
-    let next;
-    try { next=await capture(); }
-    catch(e){
-      say(e&&e.name==='NotAllowedError'?'No elegiste nada. Tocá el botón para intentar de nuevo.':'No se pudo capturar: '+(e&&e.message||e));
-      return;
-    }
-    stopCapture();
-    stream=next;video=next.getVideoTracks()[0];audio=next.getAudioTracks()[0]||null;
-    video.contentHint='motion';
-    preview.srcObject=next;$('idle').hidden=true;
-    $('noaudio').hidden=!!audio;
-    $('pick').textContent='Elegir otra ventana o pantalla';
-    describe();
-    // Sharing stopped (from the browser's bar, or the window closed): say so and offer to pick again.
-    video.onended=()=>{
-      stream=video=audio=null;preview.srcObject=null;$('idle').hidden=false;
-      $('idle').innerHTML='Se cortó la captura.<br>Elegí la ventana o pantalla de nuevo.';
-      $('noaudio').hidden=true;$('pick').textContent='Volver a elegir';
-      say('⚠️ Se cortó la captura. Tus amigos ven el último cuadro hasta que elijas de nuevo.');
-    };
-    try { await connect(); }
-    catch(e){ $('status').textContent=e.message; return; }
-    push();
+    if(picking)return false;
+    picking=true;
+    try {
+      let next;
+      try { next=await capture(); }
+      catch(e){
+        failure=e&&e.name||'error';
+        say(e&&e.name==='NotAllowedError'?(auto?'Esta ventana no puede capturar sola. Tocá el botón para elegir qué transmitir.':'No elegiste nada. Tocá el botón para intentar de nuevo.'):'No se pudo capturar: '+(e&&e.message||e));
+        return false;
+      }
+      stopCapture();
+      stream=next;video=next.getVideoTracks()[0];audio=next.getAudioTracks()[0]||null;
+      video.contentHint='motion';
+      preview.srcObject=next;$('idle').hidden=true;
+      $('noaudio').hidden=!!audio;
+      $('pick').textContent='Elegir otra ventana o pantalla';
+      describe();
+      // Sharing stopped (from the browser's bar, or the window closed): say so and offer to pick again.
+      video.onended=()=>{
+        stream=video=audio=null;preview.srcObject=null;$('idle').hidden=false;
+        $('idle').innerHTML='Se cortó la captura.<br>Elegí la ventana o pantalla de nuevo.';
+        $('noaudio').hidden=true;$('pick').textContent='Volver a elegir';
+        say('⚠️ Se cortó la captura. Tus amigos ven el último cuadro hasta que elijas de nuevo.');
+        if(auto)autoStart(3);
+      };
+      try { await connect(); }
+      catch(e){ $('status').textContent=e.message; failure='connect'; return false; }
+      push();
+      failure=null;
+      return true;
+    } finally { picking=false; }
   }
   $('pick').onclick=pick;
+  // Automatic mode: no button. The emulator may not have its window yet, so it tries a few times; if it never gets one, it leaves
+  // the room (RemoteGame then offers "Volver a transmitir") instead of hanging on.
+  async function autoStart(tries){
+    say('Preparando la transmisión…');
+    for(let i=0;i<tries;i++){
+      if(await pick())return;
+      if(failure==='NotAllowedError'||failure==='unsupported')return;   // not opened by RemoteGame: the button is for that
+      await new Promise(r=>setTimeout(r,2500));
+    }
+    say('⚠️ No pude capturar el juego. Cerrá esta ventana y volvé a transmitir desde la biblioteca.');
+    if(host)host.close();
+  }
+  if(auto)autoStart(8);
   // The picture can change size while sharing (another window, window resized): update the line and the scale.
   preview.addEventListener('resize',()=>{describe();push();});
-  mbps.onchange=()=>{store.set(MBPS_KEY,mbps.value);push();};
   // A new name reopens the room for the guests (their call restarts), so it waits until the field is left.
   gname.onchange=()=>{store.set(NAME_KEY,gname.value.trim());if(host)host.send(hello());};
 
-  // Virtual pads (vpad.js): the state of the delivery to the emulators, if this server has it.
-  let vpadTimer=null;
-  async function vpad(){
+  // Virtual pads (vpad.js): only a readable warning when something keeps the guests' buttons from reaching the emulators.
+  async function warnings(){
     try {
-      const r=await fetch('/api/vpad',{headers:{'X-RemoteGame':'vpad'}});
-      if(r.status===404){clearInterval(vpadTimer);$('vpadbox').hidden=true;return;}   // this server does not have them
-      if(!r.ok){$('vpadbox').hidden=true;return;}
-      const j=await r.json(), box=$('vpad');
-      box.textContent='';
-      for(const [k,v] of Object.entries(j&&typeof j==='object'?j:{value:j})){
-        const row=document.createElement('div'), a=document.createElement('span'), b=document.createElement('span');
-        a.textContent=k;
-        b.textContent=v&&typeof v==='object'?JSON.stringify(v).slice(0,120):String(v);
-        row.append(a,b);box.append(row);
-      }
-      $('vpadbox').hidden=!box.childNodes.length;
-    } catch(e){ $('vpadbox').hidden=true; }
+      const r=await fetch('/api/launch/state',{headers:{'X-RemoteGame':'launch'}});
+      $('padwarn').textContent=r.ok?((await r.json()).warnings||[]).join('\n'):'';
+    } catch(e){ $('padwarn').textContent=''; }
   }
-  vpad();vpadTimer=setInterval(vpad,3000);
+  warnings();setInterval(warnings,3000);
 })();
 </script>
 </body>

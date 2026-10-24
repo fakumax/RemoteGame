@@ -864,13 +864,13 @@ test('Launch: exact MAME and Eden command lines, detached, in the emulator folde
     assert.deepEqual(await r.json(), { ok: true, emulator: 'MAME', name: 'kinst2' });
     assert.equal(spawn.calls.length, 1);
     assert.equal(spawn.calls[0].exe, exes.mame);
-    assert.deepEqual(spawn.calls[0].args, ['kinst2', '-keyboardprovider', 'win32', '-window', '-maximize', '-rompath', path.join(root, 'MAME', 'Roms') + ';roms']);
+    assert.deepEqual(spawn.calls[0].args, ['kinst2', '-keyboardprovider', 'win32', '-nowindow', '-rompath', path.join(root, 'MAME', 'Roms') + ';roms']);
     assert.deepEqual(spawn.calls[0].opts, { cwd: path.dirname(exes.mame), detached: true, stdio: 'ignore', windowsHide: false });
     // A second one while the first is alive: told so, nothing starts, and where to continue.
     r = await launchCall(url, { system: 'arcade', file: 'mslug.zip' });
     assert.equal(r.status, 409);
     const busy = await r.json();
-    assert.equal(busy.busy, true); assert.equal(busy.emulator, 'MAME'); assert.equal(busy.name, 'kinst2'); assert.equal(busy.system, 'arcade'); assert.match(busy.msg, /Ya abrí MAME/);
+    assert.equal(busy.busy, true); assert.equal(busy.emulator, 'MAME'); assert.equal(busy.name, 'kinst2'); assert.equal(busy.system, 'arcade'); assert.match(busy.msg, /Ya abrí MAME/); assert.match(busy.msg, /Terminar/);
     assert.equal(spawn.calls.length, 1);
     // Closed by the player: the next one opens. Switch: Eden with the base game's real path (inside its own folders).
     spawn.calls[0].child.emit('exit', 0);
@@ -878,7 +878,7 @@ test('Launch: exact MAME and Eden command lines, detached, in the emulator folde
     r = await launchCall(url, { system: 'switch', file: mk.file });
     assert.deepEqual(await r.json(), { ok: true, emulator: 'Eden', name: 'Mario Kart 8 Deluxe' });
     assert.equal(spawn.calls[1].exe, exes.eden);
-    assert.deepEqual(spawn.calls[1].args, ['-g', path.join(root, 'Nintendo Switch 1', 'Roms', 'Mario Kart 8 Deluxe', mk.file)]);
+    assert.deepEqual(spawn.calls[1].args, ['-f', '-g', path.join(root, 'Nintendo Switch 1', 'Roms', 'Mario Kart 8 Deluxe', mk.file)]);
     assert.equal(spawn.calls[1].opts.cwd, path.dirname(exes.eden)); assert.equal(spawn.calls[1].opts.detached, true);
     // A name that MAME would read as an option never reaches it.
     spawn.calls[1].child.emit('exit', 0);
@@ -925,5 +925,134 @@ test('Launch: only this PC with its header, only library games; clear errors whe
       assert.equal(r.status, 404); assert.equal((await r.json()).msg, 'No encontré MAME en tu carpeta de juegos.');
     } finally { await none.g.close(); }
     assert.equal(spawn.calls.length, 0);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- The stream window of a launched game (a fake browser and fake process helpers: no real browser, PowerShell or kill is ever used)
+function streamRig(extra = {}) {
+  const r = { spawns: [], kills: [], focus: [], dead: new Set(), mainPid: 5151, title: 'Killer Instinct 2 [kinst2] - MAME 0.288 (LLP64)', emuKills: [] };
+  const spawn = (exe, args, opts) => { const c = new EventEmitter(); c.pid = 9000 + r.spawns.length; c.unref = () => {}; r.dead.add(c.pid); r.spawns.push({ exe, args, opts, child: c }); return c; };   // Edge's launcher exits at once
+  r.options = {
+    browser: { exe: 'C:\\Edge\\msedge.exe', name: 'Edge' }, streamProfile: path.join(os.tmpdir(), 'remotegame-test-profile'), killProcess: async pid => { r.emuKills.push(pid); },
+    stream: { spawn, windowTitle: async () => r.title, browserPid: async () => r.mainPid, kill: async pid => { r.kills.push(pid); r.dead.add(pid); if (pid === r.mainPid) r.mainPid++; }, alive: pid => !r.dead.has(pid), focus: async pid => { r.focus.push(pid); }, timing: { poll: 5, windowWait: 300, connectWait: 200, watch: 10 } },
+    ...extra
+  };
+  return r;
+}
+const stateOf = async url => (await fetch(url + '/api/launch/state', { headers: { 'X-RemoteGame': 'launch' } })).json();
+const waitFor2 = async (fn, ms = 2500) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await new Promise(r => setTimeout(r, 5)); } throw new Error('timeout'); };
+// The page of the stream window: opens the room as the host (what stream.html does once it has captured something).
+const streamHost = url => new Promise(resolve => {
+  const ws = new WebSocket(url.replace('http', 'ws') + '/ws'); clients.push(ws);
+  ws.on('open', () => { send(ws, { t: 'host', mode: 'stream', name: 'kinst2' }); resolve(ws); });
+});
+
+test('Launch + stream: one click opens the emulator and a stream window; closing the emulator closes only that window and lets go of the pads', async () => {
+  const { root } = emuRoot();
+  const emu = fakeSpawner(), rig = streamRig(), vpad = fakeVpad();
+  const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: emu, vpad, ...rig.options });
+  g.vpad = vpad;
+  try {
+    assert.deepEqual(await (await launchCall(url, { system: 'arcade', file: 'kinst2.zip' })).json(), { ok: true, emulator: 'MAME', name: 'kinst2' });
+    await waitFor2(() => rig.spawns.length === 1);
+    // The browser: Edge, its own profile, the window of the emulator by the title it showed, the audio switch, the page in auto mode.
+    const { exe, args } = rig.spawns[0];
+    assert.equal(exe, 'C:\\Edge\\msedge.exe');
+    assert.ok(args.includes('--user-data-dir=' + rig.options.streamProfile));
+    assert.ok(args.includes('--auto-select-window-capture-source-by-title=' + rig.title));
+    assert.ok(args.includes('--system-audio-capture-default_checked'));
+    assert.equal(args.at(-1), '--app=' + url.replace('127.0.0.1', 'localhost') + '/stream.html?auto=1&name=kinst2&from=arcade');
+    const st = await stateOf(url);
+    assert.deepEqual([st.running, st.emulator, st.name, st.system, st.stream], [true, 'MAME', 'kinst2', 'arcade', 'starting']);
+    // The page captures and opens the room: the state turns "on" and the emulator gets the focus back.
+    await streamHost(url);
+    await waitFor2(async () => (await stateOf(url)).stream === 'on');
+    await waitFor2(() => rig.focus.includes(4242));
+    // The emulator closes: the stream window goes (the browser's main process, nothing else) and the guests' pads are released.
+    vpad.calls.length = 0;
+    emu.calls[0].child.emit('exit', 0);
+    await waitFor2(() => rig.kills.length > 0);
+    assert.deepEqual(rig.kills, [5151]);
+    assert.deepEqual(rig.emuKills, []);
+    assert.ok(vpad.calls.some(c => c[0] === 'releaseAll'));
+    await waitFor2(async () => !(await stateOf(url)).running);
+    assert.equal((await stateOf(url)).stream, 'off');
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch + stream: the user closes the stream window (the emulator stays, "Volver a transmitir" reopens it); "Terminar" ends both', async () => {
+  const { root } = emuRoot();
+  const emu = fakeSpawner(), rig = streamRig();
+  const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: emu, ...rig.options });
+  const post = p => fetch(url + p, { method: 'POST', headers: { 'X-RemoteGame': 'launch' } });
+  try {
+    await launchCall(url, { system: 'arcade', file: 'kinst2.zip' });
+    await waitFor2(() => rig.spawns.length === 1);
+    const host = await streamHost(url);
+    await waitFor2(async () => (await stateOf(url)).stream === 'on');
+    // Window closed by the user: its process and the page's connection are gone; the emulator is not touched.
+    rig.dead.add(5151); rig.mainPid = 5152; host.close();
+    await waitFor2(async () => (await stateOf(url)).stream === 'cut');
+    assert.equal((await stateOf(url)).running, true); assert.deepEqual(rig.emuKills, []);
+    // Open again: a second browser, on the same game.
+    assert.equal((await post('/api/launch/stream')).status, 200);
+    await waitFor2(() => rig.spawns.length === 2);
+    assert.equal((await stateOf(url)).stream, 'starting');
+    // Terminar: the emulator launched by RemoteGame (by its PID) and the stream window.
+    assert.equal((await post('/api/launch/stop')).status, 200);
+    assert.deepEqual(rig.emuKills, [4242]);
+    await waitFor2(async () => !(await stateOf(url)).running);
+    await waitFor2(() => rig.kills.length > 0);
+    // Nothing is left to end or to reopen.
+    assert.equal((await post('/api/launch/stream')).status, 409);
+    assert.equal((await post('/api/launch/stop')).status, 200); assert.deepEqual(rig.emuKills, [4242]);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch + stream: a title no window answers to falls back to the screen; no browser says so; another launch is refused until Terminar', async () => {
+  const { root } = emuRoot();
+  const emu = fakeSpawner(), rig = streamRig();
+  let { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: emu, ...rig.options });
+  try {
+    await launchCall(url, { system: 'arcade', file: 'kinst2.zip' });
+    await waitFor2(() => rig.spawns.length === 2);   // nobody connects: window first, then the screen
+    assert.ok(rig.spawns[0].args.some(a => a.startsWith('--auto-select-window-capture-source-by-title=')));
+    assert.ok(rig.spawns[1].args.includes('--auto-select-screen-capture-source'));
+    assert.equal((await launchCall(url, { system: 'arcade', file: 'mslug.zip' })).status, 409);
+  } finally { await g.close(); }
+  const none = streamRig({ browser: null });
+  ({ g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: fakeSpawner(), ...none.options }));
+  try {
+    await launchCall(url, { system: 'arcade', file: 'kinst2.zip' });
+    await waitFor2(async () => (await stateOf(url)).stream === 'nobrowser');
+    assert.equal(none.spawns.length, 0);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch state: only this PC with its header; the pad warnings come in words', async () => {
+  const { root } = emuRoot();
+  const status = { dsu: { on: false, port: 26760, error: 'El puerto 26760 está ocupado por otro programa' }, keys: { on: false, targets: ['mame.exe'], error: 'PowerShell terminó con código 1' } };
+  const vpad = { ...fakeVpad(), status: () => status };
+  const emu = fakeSpawner();
+  const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: emu, vpad });
+  g.vpad = vpad;
+  try {
+    for (const headers of [{}, { 'X-RemoteGame': 'settings' }, { 'X-RemoteGame': 'launch', 'X-Forwarded-For': '203.0.113.9' }]) {
+      assert.equal((await fetch(url + '/api/launch/state', { headers })).status, 403);
+      for (const p of ['/api/launch/stop', '/api/launch/stream']) assert.equal((await fetch(url + p, { method: 'POST', headers })).status, 403);
+    }
+    // Nothing open: both warnings. With Eden open only Eden's, with MAME only MAME's.
+    const st = await stateOf(url);
+    assert.deepEqual([st.running, st.stream], [false, 'off']);
+    assert.deepEqual(st.warnings, ['⚠️ Otro programa usa el puerto 26760: los mandos de tus amigos no van a llegar a Eden', '⚠️ No se pudo activar el teclado simulado para MAME']);
+    await launchCall(url, { system: 'arcade', file: 'kinst2.zip' });
+    assert.deepEqual((await stateOf(url)).warnings, ['⚠️ No se pudo activar el teclado simulado para MAME']);
+    emu.calls[0].child.emit('exit', 0);
+    const mk = (await (await fetch(url + '/api/games?system=switch')).json()).games[0];
+    await launchCall(url, { system: 'switch', file: mk.file });
+    assert.deepEqual((await stateOf(url)).warnings, ['⚠️ Otro programa usa el puerto 26760: los mandos de tus amigos no van a llegar a Eden']);
+    // All well: nothing to say.
+    status.dsu.error = null; status.keys.error = null;
+    assert.deepEqual((await stateOf(url)).warnings, []);
   } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });

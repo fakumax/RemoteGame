@@ -11,6 +11,7 @@ const multer = require('multer');
 const AdmZip = require('adm-zip');
 const { WebSocketServer } = require('ws');
 const { createVpad } = require('./vpad');
+const { createStreamer, findBrowser, system: sysProc } = require('./stream-browser');
 
 let cfg = { port: 3000 };
 try {
@@ -829,15 +830,15 @@ const pickFolder = options.pickFolder || (() => new Promise((resolve, reject) =>
 const EMULATORS = {
   mame: {
     name: 'MAME',
-    // The keyboard provider makes MAME see the keys vpad.js injects; the games folder goes first in the ROM path (the ini is left alone).
+    // The keyboard provider makes MAME see the keys vpad.js injects; -nowindow is full screen even if the ini says window; the games folder goes first in the ROM path (the ini is left alone).
     args: (exe, sys, it) => {
       const code = it.file.replace(/\.zip$/i, '');
       if (!/^\w+$/.test(code)) throw new Error('Nombre de juego inválido');
-      return [code, '-keyboardprovider', 'win32', '-window', '-maximize', '-rompath', sys.dir + ';roms'];
+      return [code, '-keyboardprovider', 'win32', '-nowindow', '-rompath', sys.dir + ';roms'];
     }
   },
-  // Eden is a yuzu fork: -g <file> boots a game (src/core/launch_params.cpp); no -f, so it opens in a window the browser can capture.
-  eden: { name: 'Eden', args: (exe, sys, it) => ['-g', it.full] },
+  // Eden is a yuzu fork: -g <file> boots a game and -f starts it full screen (src/core/launch_params.cpp: --game, --fullscreen).
+  eden: { name: 'Eden', args: (exe, sys, it) => ['-f', '-g', it.full] },
   flycast: { name: 'Flycast', args: (exe, sys, it) => [it.full] }
 };
 const isFile = p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } };
@@ -867,9 +868,34 @@ function findEmulator(id) {
   if (!emuCache || emuCache.root !== GAMES_ROOT || (!isFile(emuCache.found[id] || '') && Date.now() - emuCache.at > 5000)) emuCache = { root: GAMES_ROOT, at: Date.now(), found: scanEmulators(GAMES_ROOT) };
   return { exe: emuCache.found[id] || null, configured: false };
 }
-// Opens a game in its native emulator. Only this PC with its header; one emulator started by RemoteGame at a time.
+// Opens a game in its native emulator and a browser window of its own that streams it (stream-browser.js). Only this PC with its
+// header; one emulator started by RemoteGame at a time. When the emulator closes, its stream window closes and the pads are let go.
 const spawnEmulator = options.spawnEmulator || require('child_process').spawn;
+const killProcess = options.killProcess || sysProc.kill;
+// Under `node --test` the stream window (real browser, PowerShell) stays off unless a test passes options.stream (fakes).
+const streamer = options.stream === false || (testing && !options.stream) ? null : createStreamer({
+  browser: options.browser === undefined ? findBrowser() : options.browser,
+  profile: path.resolve(options.streamProfile || path.join(__dirname, 'cache', 'stream-browser')),
+  port: () => server.address()?.port || PORT,
+  isConnected: () => !!party.host && party.game?.mode === 'stream',
+  ...options.stream
+});
 let running = null;
+function endSession(entry) {
+  if (entry.ended) return;
+  entry.ended = entry.done = true;
+  if (streamer) streamer.stop().catch(() => {});
+  vpadDo(v => v.releaseAll());
+}
+// What is wrong with the virtual pads, in words, for the emulator being played (none: for both).
+function padWarnings(system) {
+  let st;
+  try { st = game.vpad.status(); } catch (e) { return []; }
+  const out = [];
+  if (st.dsu && st.dsu.error && (!system || system === 'switch')) out.push(/ocupado/.test(st.dsu.error) ? '⚠️ Otro programa usa el puerto ' + st.dsu.port + ': los mandos de tus amigos no van a llegar a Eden' : '⚠️ No se pudo abrir el puerto ' + st.dsu.port + ' de los mandos para Eden');
+  if (st.keys && st.keys.error && (!system || system === 'arcade')) out.push('⚠️ No se pudo activar el teclado simulado para MAME');
+  return out;
+}
 app.post('/api/launch', ownerOnly('launch'), async (req, res) => {
   const body = req.body || {};
   const sys = getSys(body.system), file = safeFile(body.file);
@@ -878,21 +904,41 @@ app.post('/api/launch', ownerOnly('launch'), async (req, res) => {
   if (!emu) return res.status(400).json({ ok: false, msg: 'Ese sistema no se abre en un emulador de la PC.' });
   const index = systemItems(sys.id), it = index && index.byFile.get(file);
   if (!it) return res.status(404).json({ ok: false, msg: 'Ese juego no está en la biblioteca.' });
-  if (running && !running.done) return res.status(409).json({ ok: false, busy: true, emulator: running.emulator, name: running.name, system: running.system, msg: 'Ya abrí ' + running.emulator + ' para ' + running.name + '. Cerralo para abrir otro juego, o seguí con ese.' });
+  if (running && !running.done) return res.status(409).json({ ok: false, busy: true, emulator: running.emulator, name: running.name, system: running.system, msg: 'Ya abrí ' + running.emulator + ' para ' + running.name + '. Tocá Terminar para abrir otro juego.' });
   const found = findEmulator(sys.emu);
   if (!found.exe) return res.status(404).json({ ok: false, msg: found.configured ? 'La ruta de ' + emu.name + ' en los ajustes no existe.' : 'No encontré ' + emu.name + ' en tu carpeta de juegos.' });
-  const entry = running = { emulator: emu.name, name: it.name, system: sys.id, done: false };   // taken before awaiting: two clicks cannot both launch
+  const entry = running = { emulator: emu.name, name: it.name, system: sys.id, done: false, pid: null };   // taken before awaiting: two clicks cannot both launch
   let failure = null;
   try {
     const child = spawnEmulator(found.exe, emu.args(found.exe, sys, it), { cwd: path.dirname(found.exe), detached: true, stdio: 'ignore', windowsHide: false });
-    child.on('error', e => { failure = failure || e; entry.done = true; });
-    child.on('exit', () => { entry.done = true; });
+    entry.pid = child.pid;
+    child.on('error', e => { failure = failure || e; endSession(entry); });
+    child.on('exit', () => endSession(entry));
     if (child.unref) child.unref();
     // A missing or blocked program reports its error on the next tick.
     await new Promise(resolve => setImmediate(resolve));
   } catch (e) { failure = e; }
   if (failure) { if (running === entry) running = null; return res.status(500).json({ ok: false, msg: 'No pude abrir ' + emu.name + ': ' + (failure.code === 'ENOENT' ? 'el programa no existe.' : failure.message) }); }
+  if (streamer) streamer.start({ pid: entry.pid, name: entry.name, system: entry.system }).catch(() => {});
   res.json({ ok: true, emulator: emu.name, name: it.name });
+});
+// What the library shows while a game from RemoteGame is open: stream is starting | on | cut | nobrowser | off.
+app.get('/api/launch/state', ownerOnly('launch'), (req, res) => {
+  const e = running && !running.done ? running : null;
+  res.json({ ok: true, running: !!e, emulator: e ? e.emulator : null, name: e ? e.name : null, system: e ? e.system : null, stream: e && streamer ? streamer.state() : 'off', warnings: padWarnings(e && e.system) });
+});
+// "Terminar": closes the emulator RemoteGame opened (only that process) and, with it, the stream window.
+app.post('/api/launch/stop', ownerOnly('launch'), async (req, res) => {
+  const e = running;
+  if (e && !e.done) { await killProcess(e.pid); endSession(e); }
+  res.json({ ok: true });
+});
+// "Volver a transmitir": the stream window was closed but the emulator is still there.
+app.post('/api/launch/stream', ownerOnly('launch'), (req, res) => {
+  const e = running;
+  if (!e || e.done || !streamer) return res.status(409).json({ ok: false, msg: 'No hay un juego abierto desde RemoteGame.' });
+  streamer.start({ pid: e.pid, name: e.name, system: e.system }).catch(() => {});
+  res.json({ ok: true });
 });
 
 app.get('/api/games', (req, res) => {
@@ -1328,13 +1374,14 @@ async function close() {
   await new Promise(resolve => netplay.io.close(resolve));
   if (server.listening) await new Promise(resolve => server.close(resolve));
   lrAbort.abort();
+  if (streamer) await streamer.close();
   await game.vpad.close?.();
   await Promise.all([...lrBusy.values()]);
   try { if (lbDb) lbDb.close(); } catch (e) {}
   lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
-return Object.assign(game, { app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]), emulators: () => Object.fromEntries(Object.keys(EMULATORS).map(id => [id, findEmulator(id).exe])) });
+return Object.assign(game, { app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]), killStream: () => streamer && streamer.killNowSync(), emulators: () => Object.fromEntries(Object.keys(EMULATORS).map(id => [id, findEmulator(id).exe])) });
 }
 function openBrowser(url) {
   require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
@@ -1358,6 +1405,9 @@ if (require.main === module) {
   const show = () => { if (open) openBrowser('http://localhost:' + port); setTimeout(() => process.exit(0), 3000); };
   let replaced = false, deadline = 0;
   const listen = () => game.server.listen(port);
+  // The stream window is ours: it never outlives RemoteGame (Ctrl+C, closing the console, quitting).
+  process.on('exit', () => game.killStream());
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => process.exit(0));
   // The port is taken. Another RemoteGame with different code (an update) is asked to quit and this one
   // takes its place; one with the same code keeps serving (a game in progress is not cut off).
   game.server.on('error', async err => {

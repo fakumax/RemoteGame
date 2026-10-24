@@ -12,6 +12,23 @@ main.wide{max-width:1560px}
 .streambtn{display:inline-block;padding:9px 16px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;font-size:14px;font-weight:600;text-decoration:none}
 .streambtn:hover{border-color:var(--acc)}
 .streambar span{font-size:12px;color:var(--mut)}
+.playing{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center;margin-top:12px;padding:12px 14px;background:var(--card);border:1px solid var(--acc);border-radius:12px}
+.playing[hidden]{display:none}
+.playing .pl-title{font-size:15px;line-height:1.4}
+.playing .pl-title b{font-weight:700}
+.playing .pl-acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.playing button{padding:8px 16px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
+.playing button:hover:not(:disabled){border-color:var(--acc)}
+.playing button.main{background:var(--acc);color:#08122b;border-color:transparent}
+.playing button:disabled{opacity:.6;cursor:default}
+.playing .pl-link,.playing .pl-warn,.playing .pl-note{grid-column:1/-1;font-size:13px;line-height:1.5}
+.playing .pl-link{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mut)}
+.playing .pl-link code{font:12px/1.4 Consolas,monospace;color:var(--txt);word-break:break-all}
+.playing .pl-link button{padding:3px 10px;font-size:12px}
+.playing .pl-warn{color:var(--warn);white-space:pre-line}
+.playing .pl-note{color:var(--mut)}
+.playing .pl-note a{color:var(--acc)}
+.playing .pl-warn:empty,.playing .pl-note:empty,.playing .pl-link:empty{display:none}
 .party{margin-top:2px}
 .party summary{cursor:pointer;font-size:13px;color:var(--mut);padding:6px 0;user-select:none}
 .party summary b{color:var(--txt);margin-left:4px}
@@ -108,6 +125,14 @@ button.go:disabled{opacity:.6;cursor:default}
 <main class="wide">
   <div id="info"></div>
 
+  <div class="playing" id="playing" hidden>
+    <div class="pl-title" id="plTitle" aria-live="polite"></div>
+    <div class="pl-acts"><button type="button" class="main" id="plRe" hidden>Volver a transmitir</button><button type="button" id="plStop">Terminar</button></div>
+    <div class="pl-link" id="plLink"></div>
+    <div class="pl-warn" id="plWarn" role="alert"></div>
+    <div class="pl-note" id="plNote"></div>
+  </div>
+
   <div class="streambar"><a class="streambtn" href="/stream.html">📺 Transmitir un emulador</a><span>Mostrale a tus amigos MAME, Eden, Flycast o RetroArch, que corren en esta PC</span></div>
   <details class="party" id="partyBox">
     <summary>👥 Jugar con un amigo <b id="partyState"></b></summary>
@@ -195,8 +220,7 @@ function webLink(g,cls,text){
   if(g.compat===false)a.title=g.reason;
   return a;
 }
-// A native emulator on this PC: open it, then go to the stream page that captures its window.
-function streamUrl(name,system){return '/stream.html?name='+encodeURIComponent(name)+'&from='+encodeURIComponent(system);}
+// A native emulator on this PC: RemoteGame opens it and a browser window of its own that streams it; this page just shows how it goes.
 function pcBtn(g,cls,text,err){
   var b=document.createElement('button'); b.type='button'; b.className=('go '+cls).trim(); b.textContent=text; b.dataset.label=text;
   b.setAttribute('aria-label','Jugar '+g.name+' en la PC');
@@ -205,18 +229,67 @@ function pcBtn(g,cls,text,err){
 }
 function launch(g,btn,err){
   btn.disabled=true; btn.textContent='Abriendo…'; err.textContent='';
-  var fail=function(msg,j){
-    btn.disabled=false; btn.textContent=btn.dataset.label; err.textContent=msg;
-    if(j&&j.busy){var a=document.createElement('a'); a.href=streamUrl(j.name,j.system||g.system); a.textContent=' Seguir con '+j.name+' →'; err.appendChild(a);}
-  };
+  var fail=function(msg){btn.disabled=false; btn.textContent=btn.dataset.label; err.textContent=msg;};
   fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json','X-RemoteGame':'launch'},body:JSON.stringify({system:g.system,file:g.file})})
     .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok&&j.ok,j:j,status:r.status};});})
     .then(function(x){
-      if(x.ok){location.href=streamUrl(g.name,g.system);return;}   // stays "Abriendo…" while the page changes
-      fail(x.j.msg||'No pude abrir el emulador (HTTP '+x.status+').',x.j);
+      if(x.ok){btn.disabled=false; btn.textContent=btn.dataset.label; watchPlaying(); return;}
+      fail(x.j.msg||'No pude abrir el emulador (HTTP '+x.status+').');
+      if(x.j.busy)watchPlaying();
     })
     .catch(function(){fail('No pude hablar con RemoteGame. Revisá que siga abierto.');});
 }
+// The "playing on the PC" bar: what RemoteGame says about the emulator it opened and its stream window.
+var README='https://github.com/fakumax/RemoteGame#', playTimer=null, shownLink='';
+var PLAY_NOTES={switch:['Mandos de tus amigos en Eden: configuración de una sola vez','eden-switch-1'],arcade:['Teclas de tus amigos en MAME: se asignan una sola vez','mame-suelto-arcades']};
+var STREAM_TEXT={starting:' · preparando la transmisión…',on:' · transmitiendo a tus amigos',cut:' · ⚠️ Transmisión cortada',nobrowser:' · ⚠️ No encontré Edge ni Chrome para transmitir',off:''};
+function playCall(path,method){
+  return fetch(path,{method:method||'GET',headers:{'X-RemoteGame':'launch'}}).then(function(r){return r.json().catch(function(){return {};});});
+}
+function friendsLink(){
+  return fetch('/api/party').then(function(r){return r.json();}).then(function(p){
+    var url=p.publicUrl||(p.lanUrls&&p.lanUrls[0])||'', box=$('plLink');
+    if(url===shownLink&&box.firstChild)return;
+    shownLink=url; box.textContent='';
+    if(!url)return;
+    var code=document.createElement('code'), copy=document.createElement('button');
+    code.textContent=url; copy.type='button'; copy.textContent='Copiar';
+    copy.onclick=function(){navigator.clipboard.writeText(url).then(function(){copy.textContent='¡Copiado!';},function(){copy.textContent='Copialo a mano';}); setTimeout(function(){copy.textContent='Copiar';},2000);};
+    box.append('Link para tus amigos:',code,copy);
+  }).catch(function(){});
+}
+function drawPlaying(j){
+  var box=$('playing');
+  if(!j||!j.running){box.hidden=true; shownLink=''; $('plLink').textContent=''; return;}
+  box.hidden=false;
+  var t=$('plTitle'); t.textContent='';
+  var b=document.createElement('b'); b.textContent='🖥️ Jugando '+j.name+' en la PC';
+  t.append(b,STREAM_TEXT[j.stream]||'');
+  if(j.stream==='nobrowser'){var a=document.createElement('a'); a.href='/stream.html'; a.textContent=' Abrir transmisión a mano'; a.style.color='var(--acc)'; t.append(a);}
+  $('plRe').hidden=j.stream!=='cut';
+  $('plWarn').textContent=(j.warnings||[]).join('\n');
+  var n=PLAY_NOTES[j.system], note=$('plNote'); note.textContent='';
+  if(n){var l=document.createElement('a'); l.href=README+n[1]; l.target='_blank'; l.rel='noopener'; l.textContent='Ver cómo'; note.append(n[0]+'. ',l,'.');}
+  friendsLink();
+}
+function pollPlaying(){
+  playCall('/api/launch/state').then(function(j){
+    drawPlaying(j);
+    if(!j||!j.running){clearInterval(playTimer); playTimer=null;}
+  }).catch(function(){});
+}
+function watchPlaying(){
+  pollPlaying();
+  if(!playTimer)playTimer=setInterval(pollPlaying,2000);
+}
+$('plStop').onclick=function(){
+  var b=$('plStop'); b.disabled=true; b.textContent='Cerrando…';
+  playCall('/api/launch/stop','POST').then(pollPlaying).catch(function(){}).then(function(){b.disabled=false; b.textContent='Terminar';});
+};
+$('plRe').onclick=function(){
+  var b=$('plRe'); b.disabled=true;
+  playCall('/api/launch/stream','POST').then(pollPlaying).catch(function(){}).then(function(){b.disabled=false;});
+};
 // Coming back with the browser's Back button restores the page as it was: the button must be usable again.
 window.addEventListener('pageshow',function(e){
   if(e.persisted)document.querySelectorAll('button.go:disabled').forEach(function(b){b.disabled=false;b.textContent=b.dataset.label;});
@@ -408,6 +481,7 @@ async function init(){
   if(stale)$('info').textContent=STALE;
   var r=await fetch('/api/systems').then(function(x){return x.json();});
   systems=r.systems; labels={}; OWNER=!!r.owner;
+  if(OWNER)watchPlaying();   // an emulator opened before this page loaded (or from another tab) shows up too
   systems.forEach(function(s){labels[s.id]=s.label;});
   var ok=sys==='all'||systems.some(function(s){return s.id===sys&&!s.missing&&s.count>0;});
   if(!ok)sys='all';
