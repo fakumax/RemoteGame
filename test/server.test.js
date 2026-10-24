@@ -865,7 +865,10 @@ test('Launch: exact MAME and Eden command lines, detached, in the emulator folde
     assert.equal(spawn.calls.length, 1);
     assert.equal(spawn.calls[0].exe, exes.mame);
     assert.deepEqual(spawn.calls[0].args, ['kinst2', '-keyboardprovider', 'win32', '-nowindow', '-rompath', path.join(root, 'MAME', 'Roms') + ';roms']);
-    assert.deepEqual(spawn.calls[0].opts, { cwd: path.dirname(exes.mame), detached: true, stdio: 'ignore', windowsHide: false });
+    // The output goes to a file (never a pipe that could block or break); the rest is as before.
+    const { stdio, ...opts } = spawn.calls[0].opts;
+    assert.deepEqual(opts, { cwd: path.dirname(exes.mame), detached: true, windowsHide: false });
+    assert.equal(stdio[0], 'ignore'); assert.ok(Number.isInteger(stdio[1]) && stdio[1] === stdio[2]);
     // A second one while the first is alive: told so, nothing starts, and where to continue.
     r = await launchCall(url, { system: 'arcade', file: 'mslug.zip' });
     assert.equal(r.status, 409);
@@ -1055,4 +1058,214 @@ test('Launch state: only this PC with its header; the pad warnings come in words
     status.dsu.error = null; status.keys.error = null;
     assert.deepEqual((await stateOf(url)).warnings, []);
   } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- An emulator or the stream window failing must never take the server down, and the card gets the reason
+// The listeners also stop Node from ending the run, so the test can assert that nothing went uncaught.
+function trackRejections() {
+  const seen = [], on = e => seen.push(e);
+  process.on('unhandledRejection', on); process.on('uncaughtException', on);
+  return { seen, stop() { process.off('unhandledRejection', on); process.off('uncaughtException', on); } };
+}
+const alive = async url => (await fetch(url + '/api/info')).status === 200;
+// An emulator that writes `output` to the file it was given and then exits with `code` (or emits `error`) after `ms`.
+const dyingSpawner = (output, code, ms, { error } = {}) => {
+  const spawn = (exe, args, opts) => {
+    const child = new EventEmitter(); child.pid = 4242; child.unref = () => {};
+    if (output) fs.writeSync(opts.stdio[1], output);
+    setTimeout(() => error ? child.emit('error', error) : child.emit('exit', code, null), ms);
+    spawn.calls.push({ exe, args, opts, child });
+    return child;
+  };
+  spawn.calls = [];
+  return spawn;
+};
+const MAME_FATAL = 'spc700.rom NOT FOUND (tried in s_smp ffight2b)\nFatal error: Required files are missing, the machine cannot be run.\n';
+const KI2 = { system: 'arcade', file: 'kinst2.zip' };
+
+test('Launch: an emulator that exits at once with an error says why (its first useful line); the server stays up', async () => {
+  const { root } = emuRoot();
+  const rej = trackRejections();
+  const base = { gamesRoot: root, settingsFile: path.join(root, 'settings.json'), emulatorLogFile: path.join(root, 'emu.log') };
+  try {
+    // Dies a moment after the click: the click is answered, the state endpoint (polled by the card) carries the reason and the stream window goes.
+    const rig = streamRig(), msg = 'MAME no pudo abrir kinst2: spc700.rom NOT FOUND (tried in s_smp ffight2b)';
+    let { g, url } = await instance({ ...base, spawnEmulator: dyingSpawner(MAME_FATAL, 2, 60), ...rig.options });
+    try {
+      assert.equal((await launchCall(url, KI2)).status, 200);
+      await waitFor2(async () => !(await stateOf(url)).running);
+      assert.ok(await alive(url));
+      const st = await stateOf(url);
+      assert.deepEqual([st.running, st.stream, st.failed.emulator, st.failed.msg], [false, 'off', 'MAME', msg]);
+      assert.deepEqual(rig.emuKills, []);
+      // Not blocked by the failure: the next click opens another game (this fake dies too) and clears the old reason.
+      assert.equal((await launchCall(url, { system: 'arcade', file: 'mslug.zip' })).status, 200);
+      assert.equal((await stateOf(url)).failed, null);
+    } finally { await g.close(); }
+    ({ g, url } = await instance({ ...base, spawnEmulator: dyingSpawner('Error: could not initialize video\n', 1, 150) }));
+    try {
+      assert.equal((await launchCall(url, KI2)).status, 200);
+      await waitFor2(async () => !(await stateOf(url)).running);
+      assert.equal((await stateOf(url)).failed.msg, 'MAME no pudo abrir kinst2: Error: could not initialize video');
+    } finally { await g.close(); }
+    // No output at all: the exit code is the reason.
+    ({ g, url } = await instance({ ...base, spawnEmulator: dyingSpawner('', 3, 30) }));
+    try {
+      await launchCall(url, KI2);
+      await waitFor2(async () => !(await stateOf(url)).running);
+      assert.equal((await stateOf(url)).failed.msg, 'MAME no pudo abrir kinst2: se cerró enseguida (código 3)');
+    } finally { await g.close(); }
+    // A game that ran for a while and closed with an error code is not a failed start; exit code 0 never is.
+    ({ g, url } = await instance({ ...base, spawnEmulator: dyingSpawner('', 1, 60), earlyExit: 20 }));
+    try {
+      assert.equal((await launchCall(url, KI2)).status, 200);
+      await waitFor2(async () => !(await stateOf(url)).running);
+      assert.equal((await stateOf(url)).failed, null);
+    } finally { await g.close(); }
+    ({ g, url } = await instance({ ...base, spawnEmulator: dyingSpawner('', 0, 30) }));
+    try {
+      assert.equal((await launchCall(url, KI2)).status, 200);
+      await waitFor2(async () => !(await stateOf(url)).running);
+      assert.equal((await stateOf(url)).failed, null);
+    } finally { await g.close(); }
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual(rej.seen, []);
+  } finally { rej.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch: an emulator that emits "error" (ENOENT) now or later, a spawn that throws, or a kill that fails does not take the server down', async () => {
+  const { root } = emuRoot();
+  const rej = trackRejections();
+  const base = { gamesRoot: root, settingsFile: path.join(root, 'settings.json') };
+  try {
+    // After the click was answered.
+    let { g, url } = await instance({ ...base, spawnEmulator: dyingSpawner('', 0, 40, { error: Object.assign(new Error('spawn UNKNOWN'), { code: 'UNKNOWN' }) }) });
+    try {
+      assert.equal((await launchCall(url, KI2)).status, 200);
+      await waitFor2(async () => !(await stateOf(url)).running);
+      assert.ok(await alive(url));
+    } finally { await g.close(); }
+    // At once: the program does not exist.
+    ({ g, url } = await instance({ ...base, spawnEmulator: fakeSpawner('enoent') }));
+    try {
+      const r = await launchCall(url, KI2);
+      assert.equal(r.status, 500); assert.equal((await r.json()).msg, 'No pude abrir MAME: el programa no existe.');
+      assert.ok(await alive(url)); assert.equal((await stateOf(url)).running, false);
+    } finally { await g.close(); }
+    ({ g, url } = await instance({ ...base, spawnEmulator: () => { throw new Error('EACCES'); } }));
+    try {
+      assert.equal((await launchCall(url, KI2)).status, 500);
+      assert.ok(await alive(url)); assert.equal((await stateOf(url)).running, false);
+    } finally { await g.close(); }
+    ({ g, url } = await instance({ ...base, spawnEmulator: fakeSpawner(), killProcess: async () => { throw new Error('taskkill falló'); } }));
+    try {
+      await launchCall(url, KI2);
+      assert.equal((await fetch(url + '/api/launch/stop', { method: 'POST', headers: { 'X-RemoteGame': 'launch' } })).status, 200);
+      assert.equal((await stateOf(url)).running, false);
+    } finally { await g.close(); }
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual(rej.seen, []);
+  } finally { rej.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch + stream: a stream window that fails to start, dies or is never found does not take the server down', async () => {
+  const { root } = emuRoot();
+  const rej = trackRejections();
+  const timing = { poll: 5, windowWait: 60, connectWait: 40, watch: 5 };
+  const lateError = () => { const c = new EventEmitter(); c.pid = 9001; c.unref = () => {}; setTimeout(() => c.emit('error', new Error('spawn UNKNOWN')), 20); return c; };
+  const boom = msg => async () => { throw new Error(msg); };
+  try {
+    for (const [name, extra] of [
+      ['the browser cannot be launched', { spawn: () => { throw new Error('spawn EACCES'); } }],
+      ['the browser fails later with an "error" event', { spawn: lateError }],
+      // The crash that was reproduced: the browser's process is never found, the stream never connects, the screen reopen overlaps the watcher.
+      ['the browser process is never found and the stream never connects', { browserPid: async () => { await new Promise(r => setTimeout(r, 15)); return null; } }],
+      ['every window helper throws', { windowTitle: boom('powershell'), browserPid: boom('powershell'), kill: boom('taskkill'), focus: boom('focus') }]
+    ]) {
+      const emu = fakeSpawner(), rig = streamRig();
+      rig.options.stream = { ...rig.options.stream, timing, ...extra };
+      const { g, url } = await instance({ gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: emu, ...rig.options });
+      try {
+        assert.equal((await launchCall(url, KI2)).status, 200, name);
+        await new Promise(r => setTimeout(r, 400));   // the window wait, the reopen on the screen and the give-up all fit
+        assert.ok(await alive(url), name);
+        assert.equal((await stateOf(url)).running, true, name);   // the emulator is still there: only the stream is in trouble
+        emu.calls[0].child.emit('exit', 0);
+        await waitFor2(async () => !(await stateOf(url)).running);
+        assert.ok(await alive(url), name);
+      } finally { await g.close(); }
+    }
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual(rej.seen, []);
+  } finally { rej.stop(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- Arcade sets the user's MAME cannot open are "No disponible" (one `mame -verifyroms` over the folder, cached)
+const VERIFY_OUT = [
+  'romset kinst2 is good',
+  'ffight2b    : spc700.rom (64 bytes) - NOT FOUND (s_smp)',
+  'romset ffight2b is bad',
+  'mslug      : sample.bin (512 bytes) - NOT FOUND - NO GOOD DUMP KNOWN',
+  'romset mslug [parent] is best available',
+  "No matching systems found for 'zzz'",
+  '5 romsets found, 2 were OK.', ''
+].join('\r\n');
+test('Arcade: a set MAME verifies as bad is "No disponible" with the reason and no launch; a good one keeps its button; the verdict is cached', async () => {
+  const { root } = emuRoot();
+  fs.writeFileSync(path.join(root, 'MAME', 'Roms', 'ffight2b.zip'), 'x'); fs.writeFileSync(path.join(root, 'MAME', 'Roms', 'zzz.zip'), 'x');
+  const mameCacheFile = path.join(root, 'mame-compat.json'), calls = [];
+  const runMame = async (exe, args) => { calls.push(args); return args[0] === '-version' ? '0.288 (mame0288)\n' : VERIFY_OUT; };
+  const spawn = fakeSpawner();
+  // libretro on with the (tiny) fake lists: ffight2b is in neither FBNeo nor MAME 2003-Plus, so the browser has no player for it.
+  const base = { gamesRoot: root, settingsFile: path.join(root, 'settings.json'), spawnEmulator: spawn, runMame, mameCacheFile, libretro: true, libretroCacheDir: path.join(root, 'lr'), coverCacheDir: path.join(root, 'cache'), fetchLibretro: fakeLibretro({}), fetchDat: fakeDat };
+  let { g, url } = await instance(base);
+  try {
+    const find = async f => (await (await fetch(url + '/api/games?system=arcade&limit=50')).json()).games.find(x => x.file === f);
+    await waitFor2(async () => (await find('ffight2b.zip')).pc === false && (await find('ffight2b.zip')).compat === false && (await find('zzz.zip')).reason === 'MAME 0.288 no conoce este juego');
+    const ff = await find('ffight2b.zip');
+    assert.equal(ff.compat, false);   // the browser has no player for it either: nowhere to play it
+    assert.equal(ff.reason, 'MAME 0.288 lo tiene, pero le falta spc700.rom (de s_smp)');
+    assert.equal((await find('zzz.zip')).reason, 'MAME 0.288 no conoce este juego');
+    assert.equal((await find('kinst2.zip')).pc, true);
+    assert.equal((await find('mslug.zip')).pc, true);   // "best available" runs
+    const r = await launchCall(url, { system: 'arcade', file: 'ffight2b.zip' });
+    assert.equal(r.status, 409);
+    assert.equal((await r.json()).msg, 'MAME no pudo abrir ffight2b: MAME 0.288 lo tiene, pero le falta spc700.rom (de s_smp).');
+    assert.equal(spawn.calls.length, 0);
+    assert.equal((await launchCall(url, KI2)).status, 200);
+    assert.equal(calls.filter(a => a[0] === '-verifyroms').length, 1);
+    assert.ok(calls.find(a => a[0] === '-verifyroms').includes('ffight2b'));
+    assert.equal(JSON.parse(fs.readFileSync(mameCacheFile, 'utf8')).results.ffight2b.ok, false);
+  } finally { await g.close(); }
+  // Another run with the same MAME and the same ZIPs reads the cache: MAME is only asked for its version.
+  calls.length = 0;
+  ({ g, url } = await instance(base));
+  try {
+    await waitFor2(async () => (await (await fetch(url + '/api/games?system=arcade&q=ffight')).json()).games[0].pc === false);
+    assert.deepEqual(calls.filter(a => a[0] === '-verifyroms'), []);
+  } finally { await g.close(); }
+  // MAME silent: nothing is hidden.
+  ({ g, url } = await instance({ ...base, runMame: async () => '', mameCacheFile: path.join(root, 'other.json') }));
+  try {
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal((await (await fetch(url + '/api/games?system=arcade&q=ffight')).json()).games[0].pc, true);
+  } finally { await g.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Launch + stream: the stream browser is headless by default; settings.json "streamHeadless": false brings the window back', async () => {
+  const { root } = emuRoot();
+  try {
+    for (const [settings, headless] of [[{}, true], [{ streamHeadless: false }, false]]) {
+      const settingsFile = path.join(root, 'settings-' + headless + '.json');
+      fs.writeFileSync(settingsFile, JSON.stringify(settings));
+      const rig = streamRig();
+      const { g, url } = await instance({ gamesRoot: root, settingsFile, spawnEmulator: fakeSpawner(), ...rig.options });
+      try {
+        await launchCall(url, KI2);
+        await waitFor2(() => rig.spawns.length === 1);
+        assert.equal(rig.spawns[0].args.includes('--headless=new'), headless);
+        assert.ok(rig.spawns[0].args.includes('--disable-sync'));
+      } finally { await g.close(); }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

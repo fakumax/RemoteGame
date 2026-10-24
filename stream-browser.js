@@ -10,10 +10,12 @@ const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 
-// Edge first (always there on Windows 11), then Chrome. Returns { exe, name } or null.
+// Chrome first, then Edge (always there on Windows 11). Edge signs its fresh profile in with the Windows account by itself and starts
+// syncing it (--disable-sync and --allow-browser-signin=false did not stop that: account_info and consented_to_sync were still written);
+// Chrome with its own profile stays signed out. Returns { exe, name } or null.
 function findBrowser(env = process.env) {
   const roots = [env['ProgramFiles(x86)'], env.ProgramFiles, env.LOCALAPPDATA].filter(Boolean);
-  const cands = [['Edge', 'Microsoft\\Edge\\Application\\msedge.exe'], ['Chrome', 'Google\\Chrome\\Application\\chrome.exe']];
+  const cands = [['Chrome', 'Google\\Chrome\\Application\\chrome.exe'], ['Edge', 'Microsoft\\Edge\\Application\\msedge.exe']];
   for (const [name, rel] of cands) for (const r of roots) { const exe = path.join(r, rel); try { if (fs.statSync(exe).isFile()) return { exe, name }; } catch (e) { /* next */ } }
   return null;
 }
@@ -24,11 +26,14 @@ function asciiTitle(title) {
   return best.length >= 4 ? best : null;
 }
 
-// capture: { title } captures that window, anything else the screen. The window sits off screen: it only has to exist.
-function browserArgs({ profile, url, capture }) {
+// capture: { title } captures that window, anything else the screen. headless (the default): --headless=new has no window, no taskbar
+// entry and no "is sharing" bar, and still honours the auto-select flags (checked on Chrome 155 and Edge 156: a window by title,
+// system audio, WebRTC and the data channel all work). Without it the window sits off screen: it only has to exist.
+function browserArgs({ profile, url, capture, headless = true }) {
   return [
-    '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check',
-    '--window-position=-32000,-32000', '--window-size=480,320',
+    ...(headless ? ['--headless=new'] : []),
+    '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', '--disable-sync',
+    ...(headless ? [] : ['--window-position=-32000,-32000', '--window-size=480,320']),
     capture && capture.title ? '--auto-select-window-capture-source-by-title=' + capture.title : '--auto-select-screen-capture-source',
     '--system-audio-capture-default_checked',
     // Off screen counts as hidden: without these the page's timers drop to one a second.
@@ -55,12 +60,14 @@ const system = {
   spawn
 };
 
-// One emulator + one stream window at a time. o: { browser: { exe, name } | null, profile, port(), isConnected(), onFocus?(pid) } plus
+// One emulator + one stream window at a time. o: { browser: { exe, name } | null, profile, port(), isConnected(), onFocus?(pid), log?(text) } plus
 // any of the `system` helpers and `timing` ({ poll, windowWait, connectWait, watch }) to replace.
+// Nothing in here may throw into the server: every async path catches, and a failure only turns the state into "cut".
 function createStreamer(o) {
   const sys = { ...system, ...o };
   const t = { poll: 1000, windowWait: 40000, connectWait: 20000, watch: 1500, ...o.timing };
-  let cur = null, n = 0;   // cur: { pid, name, system, state, browser: { pid, child }, capture, openedAt, tries, focused }
+  const note = text => { try { if (o.log) o.log(text); } catch (e) { /* the log must not break the stream */ } };
+  let cur = null, n = 0;   // cur: { pid, name, system, state, browser: { pid, child, exited }, capture, openedAt, tries, focused }
   const wait = ms => new Promise(r => setTimeout(r, ms));
   const live = id => cur && id === n;
 
@@ -68,49 +75,55 @@ function createStreamer(o) {
     const b = cur && cur.browser;
     if (!b) return;
     cur.browser = null;
-    // The main process by our profile (it may differ from the launcher we started); the remembered PID only if that is still ours.
-    const pid = (await sys.browserPid(o.profile).catch(() => null)) || (b.pid && sys.alive(b.pid) ? b.pid : null);
-    if (pid) await sys.kill(pid);
-    if (b.child && b.child.pid && sys.alive(b.child.pid)) await sys.kill(b.child.pid);
+    try {
+      // The main process by our profile (it may differ from the launcher we started); the remembered PID only if that is still ours.
+      const pid = (await sys.browserPid(o.profile).catch(() => null)) || (b.pid && sys.alive(b.pid) ? b.pid : null);
+      if (pid) await sys.kill(pid);
+      // The launcher exits at once and Windows reuses PIDs fast: a launcher that already exited is never killed by its old PID.
+      if (b.child && b.child.pid && !b.exited && sys.alive(b.child.pid)) await sys.kill(b.child.pid);
+    } catch (e) { note('stream: no pude cerrar la ventana de transmisión: ' + e.message); }
   }
   async function open(id, capture) {
     if (!live(id)) return;
     cur.capture = capture; cur.state = 'starting'; cur.openedAt = Date.now();
     const url = 'http://localhost:' + sys.port() + '/stream.html?auto=1&name=' + encodeURIComponent(cur.name) + '&from=' + encodeURIComponent(cur.system);
-    let child;
+    const rec = { child: null, pid: null, exited: false };
     try {
-      child = sys.spawn(o.browser.exe, browserArgs({ profile: o.profile, url, capture }), { detached: true, stdio: 'ignore' });
-      child.on('error', () => { if (live(id) && cur.browser && cur.browser.child === child) { cur.browser = null; cur.state = 'cut'; } });
+      const child = rec.child = sys.spawn(o.browser.exe, browserArgs({ profile: o.profile, url, capture, headless: o.headless !== false }), { detached: true, stdio: 'ignore' });
+      child.on('error', e => { note('stream: el navegador no arrancó: ' + e.message); if (live(id) && cur.browser === rec) { cur.browser = null; cur.state = 'cut'; } });
+      child.on('exit', () => { rec.exited = true; });
       if (child.unref) child.unref();
-    } catch (e) { cur.state = 'cut'; return; }
-    cur.browser = { child, pid: null };
-    for (let i = 0; i < 20 && live(id) && cur.browser && !cur.browser.pid; i++) {
-      cur.browser.pid = await sys.browserPid(o.profile).catch(() => null);
-      if (!cur.browser.pid) await wait(Math.min(500, t.poll));
+    } catch (e) { note('stream: no pude lanzar el navegador: ' + e.message); cur.state = 'cut'; return; }
+    cur.browser = rec;
+    // Only `rec` is touched after an await: the session may have ended (cur is null) or the window been closed meanwhile.
+    for (let i = 0; i < 20 && live(id) && cur.browser === rec && !rec.pid; i++) {
+      rec.pid = await sys.browserPid(o.profile).catch(() => null);
+      if (!rec.pid) await wait(Math.min(500, t.poll));
     }
   }
   // Waits for the emulator's window (the title can take a while to appear and to settle), then opens the stream window on it.
   async function launch(id) {
+    if (!live(id)) return;
     cur.state = 'starting';
     if (!o.browser) { cur.state = 'nobrowser'; return; }
     let last = null, title = null;
     for (const end = Date.now() + t.windowWait; live(id) && Date.now() < end;) {
-      const now = String(await sys.windowTitle(cur.pid).catch(() => '') || '').trim();
+      const now = String(await sys.windowTitle(cur && cur.pid).catch(() => '') || '').trim();
       if (now && now === last) { title = asciiTitle(now); break; }
       last = now;
       await wait(t.poll);
     }
     if (!live(id)) return;
     await open(id, title ? { title } : { screen: true });
-    if (live(id) && sys.focus) setTimeout(() => { if (live(id)) sys.focus(cur.pid); }, 2500);
+    if (live(id) && sys.focus) setTimeout(() => { if (live(id)) Promise.resolve(sys.focus(cur.pid)).catch(() => {}); }, 2500).unref();
   }
   // Every so often: is the window still there, did the stream arrive, and if a window title did not match, fall back to the screen.
-  const timer = setInterval(async () => {
+  async function watch() {
     if (!cur || !cur.browser || cur.state === 'nobrowser') return;
     const id = n, b = cur.browser;
     if (b.pid && !sys.alive(b.pid)) { cur.browser = null; cur.state = 'cut'; return; }
     if (sys.isConnected()) {
-      if (cur.state === 'starting') { cur.state = 'on'; if (sys.focus && !cur.focused) { cur.focused = true; sys.focus(cur.pid); } }
+      if (cur.state === 'starting') { cur.state = 'on'; if (sys.focus && !cur.focused) { cur.focused = true; Promise.resolve(sys.focus(cur.pid)).catch(() => {}); } }
       return;
     }
     if (cur.state === 'on') { cur.state = 'cut'; await killBrowser(); return; }   // the page is gone but the process lingers
@@ -118,12 +131,22 @@ function createStreamer(o) {
       if (cur.capture && cur.capture.title) { await killBrowser(); await open(id, { screen: true }); }
       else { cur.state = 'cut'; await killBrowser(); }
     }
+  }
+  // One pass at a time (a slow reopen must not be entered twice), and whatever goes wrong is logged, never thrown.
+  let watching = false;
+  const timer = setInterval(async () => {
+    if (watching) return;
+    watching = true;
+    try { await watch(); } catch (e) { note('stream: error vigilando la ventana: ' + (e && e.stack || e)); } finally { watching = false; }
   }, t.watch);
   timer.unref();
 
   return {
-    // Starts (or restarts) the stream for an emulator process. entry: { pid, name, system }
-    start(entry) { const id = ++n; const prev = killBrowser(); cur = { ...entry, state: 'starting', browser: null }; return prev.then(() => launch(id)); },
+    // Starts (or restarts) the stream for an emulator process. entry: { pid, name, system }. Never rejects.
+    start(entry) {
+      const id = ++n; const prev = killBrowser(); cur = { ...entry, state: 'starting', browser: null };
+      return prev.then(() => launch(id)).catch(e => { note('stream: no pude abrir la transmisión: ' + (e && e.stack || e)); if (live(id)) cur.state = 'cut'; });
+    },
     state: () => cur ? cur.state : 'off',
     capture: () => cur && cur.capture || null,
     // Closes the stream window (only ours) and forgets the session.

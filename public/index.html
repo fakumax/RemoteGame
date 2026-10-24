@@ -8,33 +8,21 @@
 <script src="/share.js"></script>
 <style>
 main.wide{max-width:1560px}
-.streambar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
-.streambtn{display:inline-block;padding:9px 16px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;font-size:14px;font-weight:600;text-decoration:none}
-.streambtn:hover{border-color:var(--acc)}
-.streambar span{font-size:12px;color:var(--mut)}
-.playing{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center;margin-top:12px;padding:12px 14px;background:var(--card);border:1px solid var(--acc);border-radius:12px}
+.topbar{margin-top:12px;padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+.playing{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;align-items:center;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .playing[hidden]{display:none}
-.playing .pl-title{font-size:15px;line-height:1.4}
+.playing .pl-title{font-size:14px;line-height:1.4}
 .playing .pl-title b{font-weight:700}
 .playing .pl-acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.playing button{padding:8px 16px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
+.playing button{padding:6px 14px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer}
 .playing button:hover:not(:disabled){border-color:var(--acc)}
 .playing button.main{background:var(--acc);color:#08122b;border-color:transparent}
 .playing button:disabled{opacity:.6;cursor:default}
-.playing .pl-link,.playing .pl-warn,.playing .pl-note{grid-column:1/-1;font-size:13px;line-height:1.5}
-.playing .pl-link{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mut)}
-.playing .pl-link code{font:12px/1.4 Consolas,monospace;color:var(--txt);word-break:break-all}
-.playing .pl-link button{padding:3px 10px;font-size:12px}
+.playing .pl-warn,.playing .pl-note{grid-column:1/-1;font-size:12px;line-height:1.5}
 .playing .pl-warn{color:var(--warn);white-space:pre-line}
 .playing .pl-note{color:var(--mut)}
 .playing .pl-note a{color:var(--acc)}
-.playing .pl-warn:empty,.playing .pl-note:empty,.playing .pl-link:empty{display:none}
-.party{margin-top:2px}
-.party summary{cursor:pointer;font-size:13px;color:var(--mut);padding:6px 0;user-select:none}
-.party summary b{color:var(--txt);margin-left:4px}
-#party{margin-top:4px;padding:8px 12px;font-size:12px;line-height:1.5}
-#party .row{margin-top:3px!important;gap:6px}
-#party button.copy{padding:3px 9px;font-size:12px}
+.playing .pl-warn:empty,.playing .pl-note:empty{display:none}
 .lib{display:grid;grid-template-columns:220px minmax(0,1fr);gap:20px;align-items:start;margin-top:10px}
 .side{position:sticky;top:12px;display:flex;flex-direction:column;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px}
 .side h2{margin:4px 10px 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
@@ -99,6 +87,7 @@ button.go:disabled{opacity:.6;cursor:default}
 .setup li{color:var(--mut)}
 .setup li.ok{color:var(--txt)}
 .setup li b{display:inline-block;min-width:120px}
+.setup .alt{margin-top:14px;font-size:12px}
 .upload{margin-top:30px;font-size:13px;color:var(--mut)}
 .upload summary{cursor:pointer;user-select:none}
 .upload .row{margin-top:8px}
@@ -113,6 +102,8 @@ button.go:disabled{opacity:.6;cursor:default}
   .sys{width:auto;flex:0 0 auto;white-space:nowrap;border:1px solid var(--line);border-radius:20px;padding:7px 12px}
   .shelf{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
   .art .ph b{font-size:34px}
+  .playing{grid-template-columns:minmax(0,1fr)}
+  .playing .pl-acts{justify-content:flex-start}
 }
 </style>
 </head>
@@ -124,19 +115,15 @@ button.go:disabled{opacity:.6;cursor:default}
 <main class="wide">
   <div id="info"></div>
 
-  <div class="playing" id="playing" hidden>
-    <div class="pl-title" id="plTitle" aria-live="polite"></div>
-    <div class="pl-acts"><button type="button" class="main" id="plRe" hidden>Volver a transmitir</button><button type="button" id="plStop">Terminar</button></div>
-    <div class="pl-link" id="plLink"></div>
-    <div class="pl-warn" id="plWarn" role="alert"></div>
-    <div class="pl-note" id="plNote"></div>
+  <div class="topbar">
+    <div class="playing" id="playing" hidden>
+      <div class="pl-title" id="plTitle" aria-live="polite"></div>
+      <div class="pl-acts"><button type="button" class="main" id="plRe" hidden>Volver a transmitir</button><button type="button" id="plStop">Terminar</button></div>
+      <div class="pl-warn" id="plWarn" role="alert"></div>
+      <div class="pl-note" id="plNote"></div>
+    </div>
+    <div id="party"></div>
   </div>
-
-  <div class="streambar"><a class="streambtn" href="/stream.html">📺 Transmitir un emulador</a><span>Mostrale a tus amigos MAME, Eden, Flycast o RetroArch, que corren en esta PC</span></div>
-  <details class="party" id="partyBox">
-    <summary>👥 Jugar con un amigo <b id="partyState"></b></summary>
-    <div class="panel kbd" id="party">Cargando…</div>
-  </details>
 
   <div class="lib">
     <nav class="side" id="side" aria-label="Consolas"><h2>Consolas</h2></nav>
@@ -148,6 +135,7 @@ button.go:disabled{opacity:.6;cursor:default}
         <div class="row"><input id="setupPath" placeholder="Ej: D:\Juegos" autocomplete="off" spellcheck="false" aria-label="Ruta de la carpeta de juegos"><button id="setupPick" class="main">Buscar carpeta…</button><button id="setupScan">Revisar</button></div>
         <ul id="setupFound"></ul>
         <div class="row"><button id="setupSave" class="main" disabled>Guardar</button><button id="setupCancel">Cancelar</button><span class="mut" id="setupMsg"></span></div>
+        <div class="alt"><a href="/stream.html">Transmitir otra cosa a mano</a></div>
       </div>
       <div class="count" id="count" aria-live="polite"></div>
       <div id="games" class="shelf"></div>
@@ -226,7 +214,9 @@ function pcBtn(g,err){
   b.onclick=function(){launch(g,b,err);};
   return b;
 }
+var launchErr=null;   // the card of the latest click: if the emulator closes at once, the reason lands there
 function launch(g,btn,err){
+  launchErr=err;
   btn.disabled=true; btn.textContent='Abriendo…'; err.textContent='';
   var fail=function(msg){btn.disabled=false; btn.textContent=btn.dataset.label; err.textContent=msg;};
   fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json','X-RemoteGame':'launch'},body:JSON.stringify({system:g.system,file:g.file})})
@@ -239,27 +229,15 @@ function launch(g,btn,err){
     .catch(function(){fail('No pude hablar con RemoteGame. Revisá que siga abierto.');});
 }
 // The "playing on the PC" bar: what RemoteGame says about the emulator it opened and its stream window.
-var README='https://github.com/fakumax/RemoteGame#', playTimer=null, shownLink='';
-var PLAY_NOTES={switch:['Mandos de tus amigos en Eden: configuración de una sola vez','eden-switch-1'],arcade:['Teclas de tus amigos en MAME: se asignan una sola vez','mame-suelto-arcades']};
-var STREAM_TEXT={starting:' · preparando la transmisión…',on:' · transmitiendo a tus amigos',cut:' · ⚠️ Transmisión cortada',nobrowser:' · ⚠️ No encontré Edge ni Chrome para transmitir',off:''};
+var README='https://github.com/fakumax/RemoteGame#', playTimer=null;
+var PLAY_NOTES={switch:['Mandos en Eden: configuración de una sola vez','eden-switch-1']};   // only Eden needs a one-time setup
+var STREAM_TEXT={starting:' · preparando la transmisión…',on:' · transmitiendo',cut:' · ⚠️ Transmisión cortada',nobrowser:' · ⚠️ No encontré Edge ni Chrome para transmitir',off:''};
 function playCall(path,method){
   return fetch(path,{method:method||'GET',headers:{'X-RemoteGame':'launch'}}).then(function(r){return r.json().catch(function(){return {};});});
 }
-function friendsLink(){
-  return fetch('/api/party').then(function(r){return r.json();}).then(function(p){
-    var url=p.publicUrl||(p.lanUrls&&p.lanUrls[0])||'', box=$('plLink');
-    if(url===shownLink&&box.firstChild)return;
-    shownLink=url; box.textContent='';
-    if(!url)return;
-    var code=document.createElement('code'), copy=document.createElement('button');
-    code.textContent=url; copy.type='button'; copy.textContent='Copiar';
-    copy.onclick=function(){navigator.clipboard.writeText(url).then(function(){copy.textContent='¡Copiado!';},function(){copy.textContent='Copialo a mano';}); setTimeout(function(){copy.textContent='Copiar';},2000);};
-    box.append('Link para tus amigos:',code,copy);
-  }).catch(function(){});
-}
 function drawPlaying(j){
   var box=$('playing');
-  if(!j||!j.running){box.hidden=true; shownLink=''; $('plLink').textContent=''; return;}
+  if(!j||!j.running){box.hidden=true; return;}
   box.hidden=false;
   var t=$('plTitle'); t.textContent='';
   var b=document.createElement('b'); b.textContent='🖥️ Jugando '+j.name+' en la PC';
@@ -269,11 +247,11 @@ function drawPlaying(j){
   $('plWarn').textContent=(j.warnings||[]).join('\n');
   var n=PLAY_NOTES[j.system], note=$('plNote'); note.textContent='';
   if(n){var l=document.createElement('a'); l.href=README+n[1]; l.target='_blank'; l.rel='noopener'; l.textContent='Ver cómo'; note.append(n[0]+'. ',l,'.');}
-  friendsLink();
 }
 function pollPlaying(){
   playCall('/api/launch/state').then(function(j){
     drawPlaying(j);
+    if(j&&!j.running&&j.failed&&launchErr){launchErr.textContent=j.failed.msg; launchErr=null;}
     if(!j||!j.running){clearInterval(playTimer); playTimer=null;}
   }).catch(function(){});
 }
@@ -505,13 +483,8 @@ $('btnUp').onclick=async function(){
   if(r.ok){sys='subidos';query='';$('q').value='';save();init();}
 };
 
-// Party box: closed on small screens, and its status stays visible in the title line.
-$('partyBox').open=window.matchMedia('(min-width:761px)').matches;
+// The bar on top: the link for friends, who is in, and the Internet switch (see share.js).
 RemoteShare.banner($('party'));
-new MutationObserver(function(){
-  var b=$('party').querySelector('b');
-  $('partyState').textContent=b?b.textContent:'';
-}).observe($('party'),{childList:true});
 init().catch(function(e){$('info').textContent='No pude cargar la biblioteca ('+e.message+'). Revisá que RemoteGame siga abierto.';});
 </script>
 </body>

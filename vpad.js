@@ -256,6 +256,7 @@ function spawnKeyHelper(targets, onLine, onExit) {
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split(/\r?\n/); buffer = lines.pop(); lines.forEach(l => { if (!l) return; if (l === 'ready' && !ready) { ready = true; pending.splice(0).forEach(p => child.stdin.write(p + '\n')); } onLine(l); }); });
   child.stderr.resume();
+  child.stdout.on('error', () => {}); child.stderr.on('error', () => {});
   child.stdin.on('error', () => {});
   child.on('error', err => finish(err.code === 'ENOENT' ? 'No encontré PowerShell' : err.message));
   child.on('exit', code => finish(code ? 'PowerShell terminó con código ' + code : null));

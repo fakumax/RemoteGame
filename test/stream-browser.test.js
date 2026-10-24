@@ -9,21 +9,27 @@ const { findBrowser, browserArgs, asciiTitle, createStreamer } = require('../str
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const until = async (fn, ms = 2000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await wait(5); } throw new Error('timeout'); };
 
-test('browserArgs: own profile, app window, no picker, no throttling, off screen', () => {
+test('browserArgs: headless by default (no window, no taskbar entry, no sharing bar), own profile, no picker, no throttling', () => {
   const url = 'http://localhost:3000/stream.html?auto=1&name=kinst2&from=arcade';
-  const win = browserArgs({ profile: 'C:\\RG\\cache\\stream-browser', url, capture: { title: 'Killer Instinct 2 [kinst2] - MAME 0.288 (LLP64)' } });
-  assert.deepEqual(win, [
-    '--user-data-dir=C:\\RG\\cache\\stream-browser', '--no-first-run', '--no-default-browser-check',
-    '--window-position=-32000,-32000', '--window-size=480,320',
-    '--auto-select-window-capture-source-by-title=Killer Instinct 2 [kinst2] - MAME 0.288 (LLP64)',
+  const title = 'Killer Instinct 2 [kinst2] - MAME 0.288 (LLP64)';
+  const common = [
+    '--auto-select-window-capture-source-by-title=' + title,
     '--system-audio-capture-default_checked',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion',
     '--app=' + url
+  ];
+  assert.deepEqual(browserArgs({ profile: 'C:/RG/cache/stream-browser', url, capture: { title } }), [
+    '--headless=new', '--user-data-dir=C:/RG/cache/stream-browser', '--no-first-run', '--no-default-browser-check', '--disable-sync', ...common
+  ]);
+  // headless: false keeps the old window, off screen.
+  assert.deepEqual(browserArgs({ profile: 'C:/RG/cache/stream-browser', url, capture: { title }, headless: false }), [
+    '--user-data-dir=C:/RG/cache/stream-browser', '--no-first-run', '--no-default-browser-check', '--disable-sync',
+    '--window-position=-32000,-32000', '--window-size=480,320', ...common
   ]);
   // No window title: any screen, whatever its (translated) name.
   const screen = browserArgs({ profile: 'p', url, capture: { screen: true } });
   assert.ok(screen.includes('--auto-select-screen-capture-source') && !screen.some(a => a.includes('window-capture')));
-  assert.ok(screen.includes('--system-audio-capture-default_checked'));
+  assert.ok(screen.includes('--system-audio-capture-default_checked') && screen.includes('--headless=new'));
 });
 
 test('asciiTitle: the switch ignores anything that is not plain ASCII, so only the longest plain stretch is used', () => {
@@ -34,16 +40,16 @@ test('asciiTitle: the switch ignores anything that is not plain ASCII, so only t
   assert.equal(asciiTitle(''), null);
 });
 
-test('findBrowser: Edge before Chrome, nothing when neither exists', () => {
+test('findBrowser: Chrome before Edge (Edge signs its profile in by itself), nothing when neither exists', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remotegame-br-'));
   try {
     const put = rel => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'x'); return f; };
     const env = { ProgramFiles: path.join(root, 'pf'), 'ProgramFiles(x86)': path.join(root, 'pf86') };
     assert.equal(findBrowser(env), null);
-    const chrome = put('pf/Google/Chrome/Application/chrome.exe');
-    assert.deepEqual(findBrowser(env), { exe: chrome, name: 'Chrome' });
     const edge = put('pf86/Microsoft/Edge/Application/msedge.exe');
     assert.deepEqual(findBrowser(env), { exe: edge, name: 'Edge' });
+    const chrome = put('pf/Google/Chrome/Application/chrome.exe');
+    assert.deepEqual(findBrowser(env), { exe: chrome, name: 'Chrome' });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -137,5 +143,75 @@ test('streamer: stop kills nothing when there is no stream window, and never a P
   await r.streamer.stop();
   // Neither the profile lookup nor the launcher PID is a live process of ours: the launcher (9000) is the only candidate, and only if alive.
   assert.ok(r.kills.every(pid => pid >= 9000 && pid < 9100));
+  await r.streamer.close();
+});
+
+// ---- Nothing the browser or its helpers do may reject out of the streamer (an unhandled rejection ends Node)
+function noRejections() {
+  const seen = [], on = e => seen.push(e);
+  process.on('unhandledRejection', on); process.on('uncaughtException', on);
+  return { seen, stop() { process.off('unhandledRejection', on); process.off('uncaughtException', on); } };
+}
+
+test('streamer: the emulator ending while the screen fallback looks for the browser does not reject (the crash)', async () => {
+  const rej = noRejections();
+  try {
+    // First open finds its process at once; the reopen on the screen never does, and the session ends meanwhile.
+    let calls = 0;
+    const r = rig({ browserPid: async () => { calls++; if (calls <= 2) return 777; await wait(40); return null; }, alive: () => true, timing: { poll: 5, windowWait: 300, connectWait: 40, watch: 5 } });
+    await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    await until(() => r.spawns.length === 2);   // the watcher is reopening on the screen
+    await r.streamer.stop();
+    await wait(200);
+    assert.equal(r.streamer.state(), 'off');
+    await r.streamer.close();
+    // Never found and never connected: the watcher gives up ("cut") instead of throwing, whatever the overlap of its passes.
+    const lost = rig({ browserPid: async () => { await wait(10); return null; }, alive: () => true, timing: { poll: 5, windowWait: 300, connectWait: 30, watch: 3 } });
+    await lost.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    await until(() => lost.streamer.state() === 'cut', 3000);
+    await lost.streamer.close();
+  } finally { rej.stop(); }
+  assert.deepEqual(rej.seen, []);
+});
+
+test('streamer: a browser that cannot be launched, fails later, or helpers that throw leave the state "cut" and reject nothing', async () => {
+  const rej = noRejections(), notes = [];
+  try {
+    let r = rig({ spawn: () => { throw new Error('spawn EACCES'); }, log: t => notes.push(t) });
+    await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    assert.equal(r.streamer.state(), 'cut');
+    assert.ok(notes.some(t => /EACCES/.test(t)));
+    await r.streamer.close();
+    // An "error" event after the spawn (EACCES, UNKNOWN...) on a browser that was not found at all.
+    r = rig({ browserPid: async () => null, timing: { poll: 5, windowWait: 300, connectWait: 5000, watch: 10 } });
+    await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    r.spawns[0].child.emit('error', new Error('spawn UNKNOWN'));
+    assert.equal(r.streamer.state(), 'cut');
+    await r.streamer.close();
+    // Every helper throwing: start and stop still resolve.
+    const boom = async () => { throw new Error('powershell'); };
+    r = rig({ windowTitle: boom, browserPid: boom, kill: boom, focus: boom, log: () => { throw new Error('the log itself fails'); } });
+    await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    await r.streamer.stop();
+    await r.streamer.close();
+    // The launcher process that already exited is never killed by its old PID (Windows reuses PIDs at once).
+    r = rig({ browserPid: async () => null, alive: () => true, timing: { poll: 5, windowWait: 300, connectWait: 5000, watch: 10 } });
+    await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    r.spawns[0].child.emit('exit', 0);
+    await r.streamer.stop();
+    assert.deepEqual(r.kills, []);
+    await r.streamer.close();
+  } finally { rej.stop(); }
+  assert.deepEqual(rej.seen, []);
+});
+
+test('streamer: the browser starts headless unless told otherwise', async () => {
+  let r = rig();
+  await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+  assert.equal(r.spawns[0].args[0], '--headless=new');
+  await r.streamer.close();
+  r = rig({ headless: false });
+  await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+  assert.ok(!r.spawns[0].args.includes('--headless=new') && r.spawns[0].args.includes('--window-position=-32000,-32000'));
   await r.streamer.close();
 });

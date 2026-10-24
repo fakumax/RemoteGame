@@ -12,6 +12,8 @@ const AdmZip = require('adm-zip');
 const { WebSocketServer } = require('ws');
 const { createVpad } = require('./vpad');
 const { createStreamer, findBrowser, system: sysProc } = require('./stream-browser');
+const { createLog, installCrashGuard } = require('./crash-log');
+const { execFile } = require('child_process');
 
 let cfg = { port: 3000 };
 try {
@@ -49,6 +51,7 @@ function groupSwitch(files) {
   });
 }
 
+const defaultLog = createLog(path.join(__dirname, 'cache', 'remotegame.log'));
 function createRemoteGame(options = {}) {
 const PORT = options.port ?? (process.env.PORT ? Number(process.env.PORT) : cfg.port);
 // The games folder, in order of priority: option / GAMES_ROOT variable, settings.json (git-ignored,
@@ -64,6 +67,8 @@ const game = { publicUrl: null };
 // Virtual pads for emulators on this PC: DSU server on 127.0.0.1:26760 (Eden) and a keyboard helper (MAME).
 // Under `node --test` they stay off the real port and never start PowerShell, whatever a test creates.
 const testing = !!process.env.NODE_TEST_CONTEXT;
+// cache/remotegame.log (rotated): what the emulators, the stream window and any uncaught error did. Off the disk under `node --test`.
+const log = options.log || (testing ? createLog(null, { echo: false }) : defaultLog);
 game.vpad = options.vpad || createVpad({ dsuPort: options.dsuPort ?? (testing ? 0 : cfg.dsuPort), keys: options.keys ?? !testing, keyTargets: options.keyTargets || cfg.keyTargets });
 
 // Sistemas. dir de GAMES = lectura. Solo 'subidos' permite escritura.
@@ -423,9 +428,13 @@ function gameJson(it) {
   if (it.variant) out.variant = it.variant;
   // Opens in a native emulator on this PC (POST /api/launch); pcOnly: there is no web player at all.
   if (sys.emu) out.pc = true;
+  // The user's own MAME checked the set (see mameVerdict): when it cannot open it, there is no button and the card says why.
+  const native = sys.emu === 'mame' ? mameVerdict(it.file) : null;
+  if (native && !native.ok) out.pc = false;
   if (sys.pcOnly) out.pcOnly = true;
   if (it.updates && (it.updates.length || it.dlc)) out.extra = [it.updates.length ? 'Actualización' + (it.updates[0].version ? ' v' + it.updates[0].version : '') : '', it.dlc ? it.dlc + ' DLC' : ''].filter(Boolean).join(' · ');
   if (it.compat && it.compat.reason) { out.compat = false; out.reason = it.compat.reason; }
+  if (native && !native.ok && out.compat === false) { out.reason = native.reason; }   // nowhere to play it: say the more precise reason
   return out;
 }
 // sysId 'all' joins every console (minus `not`), same title in two consoles shows twice.
@@ -868,25 +877,106 @@ function findEmulator(id) {
   if (!emuCache || emuCache.root !== GAMES_ROOT || (!isFile(emuCache.found[id] || '') && Date.now() - emuCache.at > 5000)) emuCache = { root: GAMES_ROOT, at: Date.now(), found: scanEmulators(GAMES_ROOT) };
   return { exe: emuCache.found[id] || null, configured: false };
 }
+// Which arcade sets the user's own MAME can open. `mame -verifyroms <sets>` reads the whole folder in about 2 s, so it runs once in
+// the background (never before the server answers), and its verdict is kept in cache/mame-compat.json by MAME version and folder
+// stamp. It only reads: MAME is never given a window. Nothing known yet (or no MAME) means "assume it opens".
+const MAME_CACHE = path.resolve(options.mameCacheFile || path.join(__dirname, 'cache', 'mame-compat.json'));
+const runMame = options.runMame || ((exe, args) => new Promise(resolve => {
+  // MAME exits with 5 when some set is bad: the output is what counts, not the code.
+  execFile(exe, args, { cwd: path.dirname(exe), windowsHide: true, timeout: 120000, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (err, out, errOut) => resolve(err && !out ? '' : String(out || '') + '\n' + String(errOut || '')));
+}));
+const mameCompat = { map: null, stamp: null, version: '', busy: false, checkedAt: 0 };
+// Output of `mame -verifyroms a b c` -> Map(set -> { ok: true } | { ok: false, reason }).
+function parseVerify(text, version) {
+  const out = new Map(), detail = new Map();
+  const mame = 'MAME' + (version ? ' ' + version : '');
+  for (const raw of String(text).split(/\r?\n/)) {
+    let m;
+    if ((m = raw.match(/^romset (\S+)(?: \[\S+\])? is (good|best available|bad)\s*$/))) {
+      if (m[2] !== 'bad') { out.set(m[1].toLowerCase(), { ok: true }); continue; }
+      const lines = detail.get(m[1]) || [], line = lines.find(l => /NOT FOUND/.test(l) && !/NO GOOD DUMP/.test(l)) || lines[0] || '';
+      const file = line.replace(/\s*\(.*$/, ''), dev = (line.match(/NOT FOUND \(([^)]+)\)/) || [])[1];
+      out.set(m[1].toLowerCase(), { ok: false, reason: mame + ' lo tiene, pero ' + (file ? 'le falta ' + file + (dev ? ' (de ' + dev + ')' : '') : 'sus archivos están incompletos o no coinciden') });
+    } else if ((m = raw.match(/^No matching systems found for '(.+)'\s*$/))) {
+      out.set(m[1].replace(/\.zip$/i, '').toLowerCase(), { ok: false, reason: mame + ' no conoce este juego' });
+    } else if ((m = raw.match(/^(\S+)\s+: (.+?)\s*$/))) {
+      if (!detail.has(m[1])) detail.set(m[1], []);
+      detail.get(m[1]).push(m[2]);
+    }
+  }
+  return out;
+}
+// What identifies the folder as it is now: its ZIPs with their sizes and times.
+function arcadeStamp(dir, exe, version) {
+  const hash = crypto.createHash('sha1').update(exe + '|' + version);
+  let names;
+  try { names = fs.readdirSync(dir).filter(f => /\.zip$/i.test(f)).sort(); } catch (e) { return null; }
+  for (const f of names) { try { const st = fs.statSync(path.join(dir, f)); hash.update(f + st.size + ':' + st.mtimeMs + ';'); } catch (e) { /* gone */ } }
+  return { stamp: hash.digest('hex'), names };
+}
+async function refreshMameCompat() {
+  if (mameCompat.busy) return;
+  mameCompat.busy = true;
+  try {
+    const exe = findEmulator('mame').exe, dir = SYSTEMS.arcade.dir;
+    if (!exe) return;
+    const version = String(await runMame(exe, ['-version'])).trim().split(/\s+/)[0] || '';
+    const cur = arcadeStamp(dir, exe, version);
+    if (!cur || cur.stamp === mameCompat.stamp) return;
+    let map = null;
+    try { const c = JSON.parse(fs.readFileSync(MAME_CACHE, 'utf8')); if (c.stamp === cur.stamp) map = new Map(Object.entries(c.results)); } catch (e) { /* no cache yet */ }
+    if (!map) {
+      const t0 = Date.now(), text = [];
+      const sets = cur.names.map(f => f.replace(/\.zip$/i, '')).filter(c => /^\w+$/.test(c));
+      for (let i = 0; i < sets.length; i += 300) text.push(await runMame(exe, ['-verifyroms', ...sets.slice(i, i + 300), '-rompath', dir + ';roms']));
+      map = parseVerify(text.join('\n'), version);
+      if (!map.size) return;   // MAME did not answer: stay optimistic
+      try { fs.mkdirSync(path.dirname(MAME_CACHE), { recursive: true }); fs.writeFileSync(MAME_CACHE, JSON.stringify({ stamp: cur.stamp, version, results: Object.fromEntries(map) })); } catch (e) { /* the cache is optional */ }
+      log.write('mame', 'verificados ' + sets.length + ' sets en ' + (Date.now() - t0) + ' ms: ' + [...map.values()].filter(v => !v.ok).length + ' no se pueden abrir');
+    }
+    Object.assign(mameCompat, { map, stamp: cur.stamp, version });
+  } catch (e) { log.error('mame', e); } finally { mameCompat.busy = false; }
+}
+const mameNative = !testing || !!options.runMame;
+// { ok, reason } for an arcade ZIP, or null while unknown. Looks at the folder again every 15 s (a ROM copied in meanwhile).
+function mameVerdict(file) {
+  if (!mameNative) return null;
+  if (Date.now() - mameCompat.checkedAt > 15000) { mameCompat.checkedAt = Date.now(); refreshMameCompat(); }
+  return mameCompat.map && mameCompat.map.get(file.replace(/\.zip$/i, '').toLowerCase()) || null;
+}
+if (mameNative) setTimeout(() => { mameCompat.checkedAt = Date.now(); refreshMameCompat(); }, 0).unref();
+
 // Opens a game in its native emulator and a browser window of its own that streams it (stream-browser.js). Only this PC with its
 // header; one emulator started by RemoteGame at a time. When the emulator closes, its stream window closes and the pads are let go.
+// The emulator's output goes to a file (not a pipe: it must never block, nor break if RemoteGame restarts) and is read if it exits at once.
 const spawnEmulator = options.spawnEmulator || require('child_process').spawn;
 const killProcess = options.killProcess || sysProc.kill;
+const EMU_LOG = path.resolve(options.emulatorLogFile || (testing ? path.join(os.tmpdir(), 'remotegame-test-emulator.log') : path.join(__dirname, 'cache', 'emulator-output.log')));
+const EARLY_EXIT = options.earlyExit ?? 5000;   // an exit with an error before this many ms is a failed start (state.failed tells the page why)
 // Under `node --test` the stream window (real browser, PowerShell) stays off unless a test passes options.stream (fakes).
 const streamer = options.stream === false || (testing && !options.stream) ? null : createStreamer({
   browser: options.browser === undefined ? findBrowser() : options.browser,
   profile: path.resolve(options.streamProfile || path.join(__dirname, 'cache', 'stream-browser')),
   port: () => server.address()?.port || PORT,
   isConnected: () => !!party.host && party.game?.mode === 'stream',
+  log: text => log.write('stream', text),
+  headless: options.streamHeadless ?? readSettings().streamHeadless !== false,   // settings.json -> "streamHeadless": false brings the (off screen) window back
   ...options.stream
 });
-let running = null;
+let running = null, lastFailure = null;   // lastFailure: { name, emulator, msg } of the latest start that did not work, until the next click
 function endSession(entry) {
   if (entry.ended) return;
   entry.ended = entry.done = true;
-  if (streamer) streamer.stop().catch(() => {});
+  if (streamer) streamer.stop().catch(e => log.error('stream', e));
   vpadDo(v => v.releaseAll());
 }
+// The first line of the emulator's output that says what went wrong (MAME: "spc700.rom NOT FOUND (...)").
+function usefulLine(text) {
+  const lines = String(text).split(/\r?\n/).map(l => l.replace(/[\u0000-\u001f]/g, ' ').trim()).filter(Boolean);
+  const hit = lines.find(l => /not found|missing|failed|cannot|can't|unable|invalid|error|fatal/i.test(l)) || lines[0] || '';
+  return hit.length > 200 ? hit.slice(0, 197) + '…' : hit;
+}
+function readEmulatorOutput() { try { return fs.readFileSync(EMU_LOG, 'utf8').slice(0, 65536); } catch (e) { return ''; } }
 // What is wrong with the virtual pads, in words, for the emulator being played (none: for both).
 function padWarnings(system) {
   let st;
@@ -897,47 +987,70 @@ function padWarnings(system) {
   return out;
 }
 app.post('/api/launch', ownerOnly('launch'), async (req, res) => {
-  const body = req.body || {};
-  const sys = getSys(body.system), file = safeFile(body.file);
-  if (!sys || !file) return res.status(400).json({ ok: false, msg: 'Sistema o archivo inválido.' });
-  const emu = EMULATORS[sys.emu];
-  if (!emu) return res.status(400).json({ ok: false, msg: 'Ese sistema no se abre en un emulador de la PC.' });
-  const index = systemItems(sys.id), it = index && index.byFile.get(file);
-  if (!it) return res.status(404).json({ ok: false, msg: 'Ese juego no está en la biblioteca.' });
-  if (running && !running.done) return res.status(409).json({ ok: false, busy: true, emulator: running.emulator, name: running.name, system: running.system, msg: 'Ya abrí ' + running.emulator + ' para ' + running.name + '. Tocá Terminar para abrir otro juego.' });
-  const found = findEmulator(sys.emu);
-  if (!found.exe) return res.status(404).json({ ok: false, msg: found.configured ? 'La ruta de ' + emu.name + ' en los ajustes no existe.' : 'No encontré ' + emu.name + ' en tu carpeta de juegos.' });
-  const entry = running = { emulator: emu.name, name: it.name, system: sys.id, done: false, pid: null };   // taken before awaiting: two clicks cannot both launch
-  let failure = null;
   try {
-    const child = spawnEmulator(found.exe, emu.args(found.exe, sys, it), { cwd: path.dirname(found.exe), detached: true, stdio: 'ignore', windowsHide: false });
-    entry.pid = child.pid;
-    child.on('error', e => { failure = failure || e; endSession(entry); });
-    child.on('exit', () => endSession(entry));
-    if (child.unref) child.unref();
-    // A missing or blocked program reports its error on the next tick.
-    await new Promise(resolve => setImmediate(resolve));
-  } catch (e) { failure = e; }
-  if (failure) { if (running === entry) running = null; return res.status(500).json({ ok: false, msg: 'No pude abrir ' + emu.name + ': ' + (failure.code === 'ENOENT' ? 'el programa no existe.' : failure.message) }); }
-  if (streamer) streamer.start({ pid: entry.pid, name: entry.name, system: entry.system }).catch(() => {});
-  res.json({ ok: true, emulator: emu.name, name: it.name });
+    const body = req.body || {};
+    const sys = getSys(body.system), file = safeFile(body.file);
+    if (!sys || !file) return res.status(400).json({ ok: false, msg: 'Sistema o archivo inválido.' });
+    const emu = EMULATORS[sys.emu];
+    if (!emu) return res.status(400).json({ ok: false, msg: 'Ese sistema no se abre en un emulador de la PC.' });
+    const index = systemItems(sys.id), it = index && index.byFile.get(file);
+    if (!it) return res.status(404).json({ ok: false, msg: 'Ese juego no está en la biblioteca.' });
+    if (running && !running.done) return res.status(409).json({ ok: false, busy: true, emulator: running.emulator, name: running.name, system: running.system, msg: 'Ya abrí ' + running.emulator + ' para ' + running.name + '. Tocá Terminar para abrir otro juego.' });
+    const found = findEmulator(sys.emu);
+    if (!found.exe) return res.status(404).json({ ok: false, msg: found.configured ? 'La ruta de ' + emu.name + ' en los ajustes no existe.' : 'No encontré ' + emu.name + ' en tu carpeta de juegos.' });
+    lastFailure = null;
+    const native = sys.emu === 'mame' ? mameVerdict(file) : null;
+    if (native && !native.ok) return res.status(409).json({ ok: false, msg: emu.name + ' no pudo abrir ' + it.name + ': ' + native.reason + '.' });
+    const entry = running = { emulator: emu.name, name: it.name, system: sys.id, done: false, pid: null };   // taken before awaiting: two clicks cannot both launch
+    const startedAt = Date.now();
+    let failure = null, outFd = null;
+    try {
+      try { fs.mkdirSync(path.dirname(EMU_LOG), { recursive: true }); outFd = fs.openSync(EMU_LOG, 'w'); } catch (e) { outFd = null; }
+      const child = spawnEmulator(found.exe, emu.args(found.exe, sys, it), { cwd: path.dirname(found.exe), detached: true, stdio: outFd === null ? 'ignore' : ['ignore', outFd, outFd], windowsHide: false });
+      entry.pid = child.pid;
+      log.write('launch', emu.name + ' ' + it.name + ' (' + file + ') pid ' + child.pid);
+      // A missing or blocked program reports its error on the next tick; one that starts and dies reports it on exit.
+      child.on('error', e => { failure = failure || e; log.write('launch', emu.name + ' error: ' + e.message); endSession(entry); });
+      child.on('exit', (code, signal) => {
+        const lived = Date.now() - startedAt;
+        log.write('launch', emu.name + ' ' + it.name + ' terminó (código ' + code + (signal ? ', señal ' + signal : '') + ') tras ' + lived + ' ms');
+        if (lived < EARLY_EXIT && (code || signal) && !entry.ended && !entry.stopping) {
+          const line = usefulLine(readEmulatorOutput());
+          entry.failure = lastFailure = { name: it.name, emulator: emu.name, msg: emu.name + ' no pudo abrir ' + it.name + ': ' + (line || 'se cerró enseguida (código ' + (code ?? signal) + ')') };
+          log.write('launch', entry.failure.msg);
+        }
+        endSession(entry);
+      });
+      if (child.unref) child.unref();
+      await new Promise(resolve => setImmediate(resolve));
+    } catch (e) { failure = e; log.error('launch', e); }
+    finally { if (outFd !== null) try { fs.closeSync(outFd); } catch (e) { /* closed */ } }
+    if (failure) { endSession(entry); if (running === entry) running = null; return res.status(500).json({ ok: false, msg: 'No pude abrir ' + emu.name + ': ' + (failure.code === 'ENOENT' ? 'el programa no existe.' : failure.message) }); }
+    if (streamer && !entry.ended) streamer.start({ pid: entry.pid, name: entry.name, system: entry.system }).catch(e => log.error('stream', e));
+    if (entry.failure) return res.status(500).json({ ok: false, msg: entry.failure.msg });
+    res.json({ ok: true, emulator: emu.name, name: it.name });
+  } catch (e) {
+    log.error('launch', e);
+    if (!res.headersSent) res.status(500).json({ ok: false, msg: 'No pude abrir el emulador: ' + e.message });
+  }
 });
 // What the library shows while a game from RemoteGame is open: stream is starting | on | cut | nobrowser | off.
+// failed: why the latest start did not work (the emulator closed at once), until the next click.
 app.get('/api/launch/state', ownerOnly('launch'), (req, res) => {
   const e = running && !running.done ? running : null;
-  res.json({ ok: true, running: !!e, emulator: e ? e.emulator : null, name: e ? e.name : null, system: e ? e.system : null, stream: e && streamer ? streamer.state() : 'off', warnings: padWarnings(e && e.system) });
+  res.json({ ok: true, running: !!e, emulator: e ? e.emulator : null, name: e ? e.name : null, system: e ? e.system : null, stream: e && streamer ? streamer.state() : 'off', warnings: padWarnings(e && e.system), failed: e ? null : lastFailure });
 });
 // "Terminar": closes the emulator RemoteGame opened (only that process) and, with it, the stream window.
 app.post('/api/launch/stop', ownerOnly('launch'), async (req, res) => {
   const e = running;
-  if (e && !e.done) { await killProcess(e.pid); endSession(e); }
+  try { if (e && !e.done) { e.stopping = true; await killProcess(e.pid); endSession(e); } } catch (err) { log.error('launch', err); if (e) endSession(e); }
   res.json({ ok: true });
 });
 // "Volver a transmitir": the stream window was closed but the emulator is still there.
 app.post('/api/launch/stream', ownerOnly('launch'), (req, res) => {
   const e = running;
   if (!e || e.done || !streamer) return res.status(409).json({ ok: false, msg: 'No hay un juego abierto desde RemoteGame.' });
-  streamer.start({ pid: e.pid, name: e.name, system: e.system }).catch(() => {});
+  streamer.start({ pid: e.pid, name: e.name, system: e.system }).catch(err => log.error('stream', err));
   res.json({ ok: true });
 });
 
@@ -1381,7 +1494,7 @@ async function close() {
   lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
-return Object.assign(game, { app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]), killStream: () => streamer && streamer.killNowSync(), emulators: () => Object.fromEntries(Object.keys(EMULATORS).map(id => [id, findEmulator(id).exe])) });
+return Object.assign(game, { log, app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]), killStream: () => streamer && streamer.killNowSync(), emulators: () => Object.fromEntries(Object.keys(EMULATORS).map(id => [id, findEmulator(id).exe])) });
 }
 function openBrowser(url) {
   require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
@@ -1397,7 +1510,9 @@ async function askToQuit(port) {
   try { return (await fetch('http://127.0.0.1:' + port + '/api/quit', { method: 'POST', headers: { 'X-RemoteGame': 'quit' }, signal: AbortSignal.timeout(3000) })).status; } catch (e) { return 0; }
 }
 if (require.main === module) {
-  const game = createRemoteGame();
+  // Whatever an emulator, the stream window or a dependency throws without a catch is logged (cache/remotegame.log), not fatal.
+  installCrashGuard(process, defaultLog);
+  const game = createRemoteGame({ log: defaultLog });
   const port = Number(process.env.PORT || cfg.port);
   // --open (desktop shortcut, pnpm start): show the library in the browser.
   const open = process.argv.includes('--open');
@@ -1411,7 +1526,7 @@ if (require.main === module) {
   // The port is taken. Another RemoteGame with different code (an update) is asked to quit and this one
   // takes its place; one with the same code keeps serving (a game in progress is not cut off).
   game.server.on('error', async err => {
-    if (err.code !== 'EADDRINUSE') throw err;
+    if (err.code !== 'EADDRINUSE') { defaultLog.error('listen', err); return void setTimeout(() => process.exit(1), 3000); }   // not an uncaught error: there is nothing to serve
     if (deadline) {   // waiting for the old one to let go of the port
       if (Date.now() < deadline) return void setTimeout(listen, 250);
       console.log('La versión anterior de RemoteGame no se cerró: cerrá su ventana y volvé a abrir el acceso directo.');
@@ -1431,6 +1546,7 @@ if (require.main === module) {
   });
   game.server.once('listening', () => {
     console.log('RemoteGame v0.5.0 en http://localhost:' + port);
+    defaultLog.write('server', 'arrancó en el puerto ' + port + ' (pid ' + process.pid + ', node ' + process.version + ')');
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
     // --no-share and SHARE=0 start it off for this run only; otherwise the saved switch (settings.json) decides.
     // After a replacement, give ngrok a moment to notice the old tunnel is gone (the free plan allows one).
