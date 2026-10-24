@@ -2,6 +2,9 @@
 // They never touch the stream: each side sees its own pick on its own screen.
 (function(root) {
   const KEY = 'remotegame-crt';
+  // A native emulator streamed from the PC (core 'native') keeps its own pick and starts with the filter off:
+  // the picture is already a 720p+ capture, not a 240-line game, and the web games' pick stays untouched.
+  const NATIVE_KEY = 'remotegame-crt-native';
   // Old versions stored 'on' / 'off'.
   const STYLES = { off: 'Apagado', classic: 'CRT clásico', scan: 'Scanlines', soft: 'Scanlines suaves', trin: 'Trinitron', arcade: 'Arcade' };
   const style = document.createElement('style');
@@ -43,20 +46,22 @@
   document.head.appendChild(style);
 
   const known = v => Object.hasOwn(STYLES, v);
-  function saved() {
+  function saved(key, fallback) {
     try {
-      const v = localStorage.getItem(KEY);
-      return v === 'on' || !known(v) ? 'classic' : v;
-    } catch (e) { return 'classic'; }
+      const v = localStorage.getItem(key);
+      return v === 'on' ? 'classic' : known(v) ? v : fallback;
+    } catch (e) { return fallback; }
   }
-  function save(v) { try { localStorage.setItem(KEY, v); } catch (e) {} }
+  function save(key, v) { try { localStorage.setItem(key, v); } catch (e) {} }
 
   // frame: box exactly covering the picture. select: optional <select> to pick the look.
   function attach(frame, select) {
     const layer = document.createElement('div');
     layer.className = 'crt';
     frame.appendChild(layer);
-    let lines = 240, look = saved();
+    let lines = 240, native = false;
+    const looks = { web: saved(KEY, 'classic'), native: saved(NATIVE_KEY, 'off') };
+    const slot = () => native ? 'native' : 'web';
     // One dark scanline per game line; thinner than 2.5px on screen they would shimmer, so fade them.
     const fit = () => {
       const px = frame.getBoundingClientRect().height / lines;
@@ -64,6 +69,7 @@
       frame.style.setProperty('--k', px >= 2.5 ? '1' : px >= 1.8 ? '.56' : '0');
     };
     const render = () => {
+      const look = looks[slot()];
       for (const id in STYLES) frame.classList.toggle('crt-' + id, id === look);
       frame.classList.toggle('crt-on', look !== 'off');
       if (select) select.value = look;
@@ -73,12 +79,12 @@
     if (select) {
       select.textContent = '';
       for (const id in STYLES) { const o = document.createElement('option'); o.value = id; o.textContent = STYLES[id]; select.appendChild(o); }
-      select.onchange = () => { look = known(select.value) ? select.value : 'classic'; save(look); render(); };
+      select.onchange = () => { looks[slot()] = known(select.value) ? select.value : native ? 'off' : 'classic'; save(native ? NATIVE_KEY : KEY, looks[slot()]); render(); };
     }
     fit(); render();
     return {
       // Arcade boards draw 224 lines; consoles 240.
-      setCore(core) { lines = core === 'fbneo' || core === 'mame2003' ? 224 : 240; fit(); }
+      setCore(core) { lines = core === 'fbneo' || core === 'mame2003' || core === 'mame2003_plus' ? 224 : 240; native = core === 'native'; fit(); render(); }
     };
   }
   root.RemoteCRT = { attach, STYLES };

@@ -24,10 +24,27 @@ test('Pads: key layouts translate to KeyboardEvent.code and never overlap in 2P'
 });
 
 test('Pads: guest keyboard and gamepad become one RetroPad state', () => {
-  assert.deepEqual(pads.readGuest({ KeyZ: true, ArrowUp: true, Enter: false }, [], false), { b: 1 | 1 << 4, x: 0, y: 0 });
+  assert.deepEqual(pads.readGuest({ KeyZ: true, ArrowUp: true, Enter: false }, [], false), { b: 1 | 1 << 4, x: 0, y: 0, rx: 0, ry: 0 });
   const p = { connected: true, buttons: [{ pressed: false }, { pressed: true }], axes: [-0.9, 0] };
-  assert.deepEqual(pads.readGuest({}, [p], false), { b: 1 << 8 | 1 << 6, x: 0, y: 0 });
-  assert.deepEqual(pads.readGuest({}, [p], true), { b: 1 << 8, x: -114, y: 0 });
+  assert.deepEqual(pads.readGuest({}, [p], false), { b: 1 << 8 | 1 << 6, x: 0, y: 0, rx: 0, ry: 0 });
+  assert.deepEqual(pads.readGuest({}, [p], true), { b: 1 << 8, x: -114, y: 0, rx: 0, ry: 0 });
+});
+
+test('Pads: guest reads both sticks when the game is analog, and the right one is ignored otherwise', () => {
+  // Xbox-style standard mapping: axes 0/1 left stick, 2/3 right stick.
+  const two = pad('Xbox 360 Controller (XInput STANDARD GAMEPAD)', [0], [0.5, -1, -1, 0.9]);
+  assert.deepEqual(pads.readGuest({}, [two], true), { b: 1, x: 64, y: -127, rx: -127, ry: 114 });
+  // Without analog the left stick becomes the D-pad and the right one does nothing.
+  assert.deepEqual(pads.readGuest({}, [two], false), { b: 1 | 1 << 4, x: 0, y: 0, rx: 0, ry: 0 });
+  // The dead zone cleans the drift of both sticks.
+  assert.deepEqual(pads.readGuest({}, [pad(DUALSENSE, [], [0.1, -0.1, 0.12, 0.14])], true), { b: 0, x: 0, y: 0, rx: 0, ry: 0 });
+  // A second pad adds to the first; each axis keeps the one that moves.
+  const idle = pad(DUALSENSE, [], [0, 0, 0, 0], { index: 0 }), moving = pad(DUALSENSE, [], [0, 0, 1, 0], { index: 1 });
+  assert.equal(pads.readGuest({}, [idle, moving], true).rx, 127);
+  // The state it produces goes through applyGuest to the right stick inputs (20-23).
+  const calls = [];
+  pads.applyGuest(pads.EMPTY, { b: 0, x: 0, y: 0, rx: 127, ry: -127 }, (i, v) => calls.push([i, v]));
+  assert.deepEqual(calls, [[20, 0x7fff], [21, 0], [22, 0], [23, 0x7fff]]);
 });
 
 test('Pads: an idle pad in front does not hide the real one', () => {

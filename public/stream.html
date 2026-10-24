@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RemoteGame · Transmitir un emulador</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+/* Like play-ejs: on desktop the preview takes the height of the window (16:9) and a narrow column holds
+   the info; nothing scrolls. Narrow screens: the preview on top, the column below. */
+#app{display:flex;flex-direction:column;min-height:100vh}
+#stage{padding:8px;display:flex;justify-content:center;align-items:center}
+#fsbox{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden}
+#preview{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+#idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:var(--mut);font-size:15px;line-height:1.5;pointer-events:none}
+#idle[hidden]{display:none}
+#side{padding:10px 12px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+#side .panel{margin:0;padding:10px}
+#head{display:flex;gap:8px;align-items:center;justify-content:space-between}
+#head a{font-size:13px;text-decoration:none}
+#title{font-size:17px;line-height:1.25;margin:0}
+#status{white-space:pre-line;font-size:13px}#status:empty{display:none}
+#peers{margin-top:6px;font-size:13px}#peers:empty{display:none}
+.peer{display:flex;gap:10px;align-items:baseline}.peer b{min-width:2ch}.peer span{white-space:nowrap}
+.warn{color:var(--warn)}.bad{color:#ff5d5d}
+.field{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mut)}
+.field input,.field select{width:100%;padding:8px;font-size:14px;background:#0f1220;color:var(--txt);border:1px solid var(--line);border-radius:8px}
+#capture{display:flex;flex-direction:column;gap:8px}
+#pick{padding:11px;font-size:15px;font-weight:700;background:var(--acc);color:#08122b;border:0;border-radius:8px;cursor:pointer}
+#pick:hover{filter:brightness(1.1)}
+#capinfo,#noaudio,#vpad{font-size:13px;line-height:1.5}#capinfo:empty{display:none}
+#vpad div{display:flex;gap:8px}#vpad span:first-child{color:var(--mut);min-width:9ch}
+#helpbox summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
+#help p{margin:0 0 6px}
+@media (min-width:900px){
+  body{height:100vh;height:100dvh;overflow:hidden}
+  #app{flex-direction:row;height:100%;min-height:0}
+  #stage{flex:1;min-width:0;min-height:0;padding:8px}
+  #fsbox{width:min(100%,calc((100vh - 16px) * 16 / 9));width:min(100%,calc((100dvh - 16px) * 16 / 9))}
+  #side{width:clamp(320px,26vw,400px);flex:none;overflow-y:auto;border-left:1px solid var(--line)}
+}
+</style>
+<script src="/webrtc.js"></script>
+<script src="/host.js"></script>
+<script src="/pads.js"></script>
+<script src="/share.js"></script>
+<script src="/hud.js"></script>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><div id="fsbox"><video id="preview" muted autoplay playsinline></video><div id="idle">Acá ves lo que transmitís.<br>Elegí la ventana del emulador o toda la pantalla.</div></div></div>
+  <aside id="side">
+    <div id="head"><a href="/">← RemoteGame</a><span class="pill p1">Transmisión · vos sos P1</span></div>
+    <h1 id="title">📺 Transmitir un emulador</h1>
+    <div class="panel">
+      <div id="links"></div>
+      <div id="peers"></div>
+      <div id="status">Elegí qué transmitir para abrir la sala.</div>
+    </div>
+    <div class="panel" id="capture">
+      <label class="field">¿A qué juegan?<input type="text" id="gname" maxlength="60" placeholder="Juego de la PC" autocomplete="off"></label>
+      <button id="pick">Elegir ventana o pantalla</button>
+      <div id="capinfo"></div>
+      <div id="noaudio" class="warn" hidden>🔇 Para que tus amigos escuchen, compartí la pantalla completa y marcá "Compartir audio del sistema".</div>
+      <label class="field">Calidad del video<select id="mbps"><option value="8">Normal · 8 Mbps</option><option value="15" selected>Alta · 15 Mbps</option><option value="25">Máxima · 25 Mbps</option></select></label>
+    </div>
+    <div class="panel" id="vpadbox" hidden><b style="font-size:13px">Mandos virtuales</b><div id="vpad"></div></div>
+    <details id="helpbox"><summary>Ayuda</summary><div class="kbd" id="help">
+      <p><b>P1 sos vos:</b> jugás con tu mando directo en el emulador, sin pasar por RemoteGame. Tus amigos son P2, P3 y P4: sus botones llegan a esta PC como mandos virtuales.</p>
+      <p><b>Switch (Eden):</b> poné P2–P4 como "mando UDP", pads 1–3.</p>
+      <p><b>MAME:</b> agregá <kbd>-keyboardprovider win32</kbd> al abrirlo.</p>
+      <p>Dejá el emulador al frente: esta pestaña puede quedar detrás, pero no la cierres. Los detalles están en el README, en "Transmitir un emulador de la PC".</p>
+    </div></details>
+  </aside>
+</div>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const DEFAULT='Juego de la PC', NAME_KEY='remotegame-stream-name', MBPS_KEY='remotegame-stream-mbps';
+  let host=null, starting=null, stream=null, video=null, audio=null;
+  const store={get(k){try{return localStorage.getItem(k);}catch(e){return null;}},set(k,v){try{localStorage.setItem(k,v);}catch(e){}}};
+  const preview=$('preview'), gname=$('gname'), mbps=$('mbps');
+  gname.value=store.get(NAME_KEY)||'';
+  if([...mbps.options].some(o=>o.value===store.get(MBPS_KEY)))mbps.value=store.get(MBPS_KEY);
+  // The banner (links and who is in) is there from the start; the room opens when something is being shared.
+  RemoteShare.banner($('links'));
+
+  const name=()=>gname.value.replace(/\s+/g,' ').trim().slice(0,60)||DEFAULT;
+  const hello=()=>({t:'host',mode:'stream',name:name()});
+  // A screen above 1080p goes out scaled down: 4K at 60 fps would drown the encoder and the upload.
+  const scale=()=>{const w=video&&video.getSettings?video.getSettings().width:0;return w>1920?w/1920:1;};
+  const tracks=()=>({video,audio,scale:scale(),maxBitrate:Number(mbps.value)*1e6,codec:'h264'});
+  const push=()=>{if(host)host.setTracks();};
+
+  function connect(){
+    if(host)return Promise.resolve(host);
+    return starting||(starting=RemoteHost.start({
+      hello:hello(),
+      els:{status:$('status'),peers:$('peers'),pingBox:$('fsbox')},
+      getTracks:tracks,
+      // Straight from each guest's channel event to the server: no timers, which the browser slows down in a background tab.
+      onPad:(seat,s)=>host&&host.send({t:'vpad',slot:seat,b:s.b,x:s.x,y:s.y,rx:s.rx,ry:s.ry}),
+      onRelease:seat=>host&&host.send({t:'vpad',slot:seat,release:true}),
+      hostingNote:'Sala abierta: tus amigos ya ven lo que transmitís.',
+      replacedText:'Abriste otra transmisión o juego en otra pestaña. Cerrá esta.'
+    }).then(h=>(host=h),e=>{starting=null;throw e;}));
+  }
+
+  const say=text=>{$('capinfo').textContent=text;};
+  function describe(){
+    if(!video)return;
+    const s=video.getSettings?video.getSettings():{};
+    const size=s.width&&s.height?s.width+'×'+s.height:'';
+    const fps=s.frameRate?Math.round(s.frameRate)+' fps':'';
+    say('📺 Transmitiendo '+[size,fps].filter(Boolean).join(' · ')+(scale()>1?' (se envía en 1080p)':''));
+  }
+
+  const gdm=o=>navigator.mediaDevices.getDisplayMedia(o);
+  // Chrome 105+ knows systemAudio, 107+ selfBrowserSurface and surfaceSwitching; a browser that does not
+  // ignores them (unknown keys in the options are dropped). If it rejects the set anyway, ask for the basics.
+  async function capture(){
+    const frames={frameRate:{ideal:60}};
+    try {
+      return await gdm({video:frames,audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},systemAudio:'include',selfBrowserSurface:'exclude',surfaceSwitching:'include'});
+    } catch(e){
+      if(e&&(e.name==='TypeError'||e.name==='OverconstrainedError'))return gdm({video:frames,audio:true});
+      throw e;
+    }
+  }
+  function stopCapture(){
+    if(!stream)return;
+    for(const t of stream.getTracks()){t.onended=null;t.stop();}
+    stream=video=audio=null;
+  }
+  async function pick(){
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia){
+      $('status').textContent='Este navegador no puede capturar la pantalla. Abrí esta página en Chrome o Edge desde http://localhost:'+(location.port||80)+'.';
+      return;
+    }
+    let next;
+    try { next=await capture(); }
+    catch(e){
+      say(e&&e.name==='NotAllowedError'?'No elegiste nada. Tocá el botón para intentar de nuevo.':'No se pudo capturar: '+(e&&e.message||e));
+      return;
+    }
+    stopCapture();
+    stream=next;video=next.getVideoTracks()[0];audio=next.getAudioTracks()[0]||null;
+    video.contentHint='motion';
+    preview.srcObject=next;$('idle').hidden=true;
+    $('noaudio').hidden=!!audio;
+    $('pick').textContent='Elegir otra ventana o pantalla';
+    describe();
+    // Sharing stopped (from the browser's bar, or the window closed): say so and offer to pick again.
+    video.onended=()=>{
+      stream=video=audio=null;preview.srcObject=null;$('idle').hidden=false;
+      $('idle').innerHTML='Se cortó la captura.<br>Elegí la ventana o pantalla de nuevo.';
+      $('noaudio').hidden=true;$('pick').textContent='Volver a elegir';
+      say('⚠️ Se cortó la captura. Tus amigos ven el último cuadro hasta que elijas de nuevo.');
+    };
+    try { await connect(); }
+    catch(e){ $('status').textContent=e.message; return; }
+    push();
+  }
+  $('pick').onclick=pick;
+  // The picture can change size while sharing (another window, window resized): update the line and the scale.
+  preview.addEventListener('resize',()=>{describe();push();});
+  mbps.onchange=()=>{store.set(MBPS_KEY,mbps.value);push();};
+  // A new name reopens the room for the guests (their call restarts), so it waits until the field is left.
+  gname.onchange=()=>{store.set(NAME_KEY,gname.value.trim());if(host)host.send(hello());};
+
+  // Virtual pads (vpad.js): the state of the delivery to the emulators, if this server has it.
+  let vpadTimer=null;
+  async function vpad(){
+    try {
+      const r=await fetch('/api/vpad',{headers:{'X-RemoteGame':'vpad'}});
+      if(r.status===404){clearInterval(vpadTimer);$('vpadbox').hidden=true;return;}   // this server does not have them
+      if(!r.ok){$('vpadbox').hidden=true;return;}
+      const j=await r.json(), box=$('vpad');
+      box.textContent='';
+      for(const [k,v] of Object.entries(j&&typeof j==='object'?j:{value:j})){
+        const row=document.createElement('div'), a=document.createElement('span'), b=document.createElement('span');
+        a.textContent=k;
+        b.textContent=v&&typeof v==='object'?JSON.stringify(v).slice(0,120):String(v);
+        row.append(a,b);box.append(row);
+      }
+      $('vpadbox').hidden=!box.childNodes.length;
+    } catch(e){ $('vpadbox').hidden=true; }
+  }
+  vpad();vpadTimer=setInterval(vpad,3000);
+})();
+</script>
+</body>
+</html>

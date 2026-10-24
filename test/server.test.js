@@ -254,6 +254,90 @@ test('Party: visitors through the tunnel land on the room, this PC sees the libr
   assert.match(await (await fetch(base+'/sala')).text(),/invitado/);
   const upload=await fetch(base+'/api/upload',{method:'POST',headers:{'X-Forwarded-For':'203.0.113.9'}});assert.equal(upload.status,403);
 });
+// Stream mode: the host captures a native emulator; the guests' pads reach a virtual pad (here a fake that records calls).
+const fakeVpad=()=>{const calls=[];return {calls,update:(slot,state)=>calls.push(['update',slot,state]),release:slot=>calls.push(['release',slot]),releaseAll:()=>calls.push(['releaseAll']),status:()=>({}),close(){}};};
+async function streamParty(){
+  const vpad=fakeVpad();
+  const {g,url}=await instance({gamesRoot:temp,vpad,settingsFile:path.join(temp,'stream-settings.json')});
+  g.vpad=vpad;   // what the server does itself with options.vpad
+  const connect=async remote=>{
+    const ws=new WebSocket(url.replace('http','ws')+'/ws',remote?{headers:{'X-Forwarded-For':'203.0.113.9'}}:undefined);clients.push(ws);
+    ws.queue=[];ws.on('message',d=>ws.queue.push(JSON.parse(d)));await once(ws,'open');return ws;
+  };
+  return {g,url,vpad,connect,pause:()=>new Promise(r=>setTimeout(r,40))};
+}
+test('Stream: only this PC hosts a stream, without a ROM, and the guests are told it is analog',async()=>{
+  const {g,url,connect}=await streamParty();
+  try {
+    const tunnel=await connect(true);
+    send(tunnel,{t:'host',mode:'stream',name:'Eden'});assert.match((await message(tunnel,'error')).msg,/anfitriona/);
+    assert.equal(g.party.host,null);
+    const host=await connect(),guest=await connect(true);
+    // The name is a short, tidy string; anything else becomes the default.
+    send(host,{t:'host',mode:'stream',name:'  Mario\u0007 Kart \n  en Eden '+'x'.repeat(100)});
+    const hosting=await message(host,'hosting');
+    assert.equal(hosting.name.length<=60,true);assert.match(hosting.name,/^Mario Kart en Eden x+$/);
+    assert.deepEqual(g.party.game,{mode:'stream',core:'native',analog:true,name:hosting.name});
+    send(guest,{t:'guest',id:'stream-a'});
+    const joined=await message(guest,'game');
+    assert.deepEqual(joined.game,{mode:'stream',core:'native',analog:true,name:hosting.name});assert.equal(joined.player,2);
+    assert.equal((await message(host,'peer')).slot,0);
+    assert.equal((await (await fetch(url+'/api/party')).json()).game.mode,'stream');
+    for(const name of [undefined,123,{a:1},'   '])send(host,{t:'host',mode:'stream',name});
+    for(const name of [undefined,123,{a:1},'   '])assert.equal((await message(host,'hosting')).name,'Juego de la PC');
+    // A ROM-less normal host stays refused: only mode "stream" skips the ROM.
+    send(host,{t:'host',system:'nes',core:'nes'});assert.match((await message(host,'error')).msg,/inválido/);
+  } finally { await g.close(); }
+});
+test('Stream: vpad only from the stream host, with a seat and clamped values',async()=>{
+  const {g,vpad,connect,pause}=await streamParty();
+  try {
+    const host=await connect();send(host,{t:'host',mode:'stream',name:'Eden'});await message(host,'hosting');
+    const a=await connect(true);send(a,{t:'guest',id:'vp-a'});await message(a,'game');await message(host,'peer');
+    send(host,{t:'vpad',slot:0,b:0x1ffff,x:999,y:-999,rx:'abc',ry:3.6});
+    await waitFor(()=>vpad.calls.length===1);
+    assert.deepEqual(vpad.calls[0],['update',0,{b:0xffff,x:127,y:-127,rx:0,ry:4}]);
+    // Bad seats, a seat nobody holds, and anyone but the host: nothing reaches the pad.
+    for(const slot of [-1,3,1.5,'0',null,undefined])send(host,{t:'vpad',slot,b:1});
+    send(host,{t:'vpad',slot:1,b:1});
+    send(a,{t:'vpad',slot:0,b:1});send(a,{t:'vpad',slot:0,release:true});
+    const tunnel=await connect(true);send(tunnel,{t:'vpad',slot:0,b:1});
+    await pause();assert.equal(vpad.calls.length,1);
+    // The host lets go of a seat explicitly.
+    send(host,{t:'vpad',slot:0,release:true});await waitFor(()=>vpad.calls.length===2);
+    assert.deepEqual(vpad.calls[1],['release',0]);
+    // A guest that leaves, or is replaced by its own reload, is released by the server itself.
+    vpad.calls.length=0;
+    const a2=await connect(true);send(a2,{t:'guest',id:'vp-a'});await message(a,'replaced');
+    await waitFor(()=>vpad.calls.some(c=>c[0]==='release'&&c[1]===0));
+    vpad.calls.length=0;
+    a2.close();await message(host,'peer-left');
+    assert.deepEqual(vpad.calls,[['release',0]]);
+    send(host,{t:'vpad',slot:0,b:1});await pause();assert.equal(vpad.calls.length,1,'a late packet of a guest that left is dropped');
+    // A new host replaces the old one: everything is released. Closing the last host does too.
+    vpad.calls.length=0;
+    const host2=await connect();send(host2,{t:'host',mode:'stream',name:'Otro'});await message(host,'replaced');
+    assert.deepEqual(vpad.calls,[['releaseAll']]);
+    send(host,{t:'vpad',slot:0,b:1});await pause();assert.equal(vpad.calls.length,1,'the replaced host cannot send any more');
+    vpad.calls.length=0;
+    host2.close();await waitFor(()=>vpad.calls.length===1);
+    assert.deepEqual(vpad.calls,[['releaseAll']]);
+  } finally { await g.close(); }
+});
+test('Stream: an EmulatorJS host never reaches the virtual pads',async()=>{
+  const {g,vpad,connect,pause}=await streamParty();
+  try {
+    const host=await connect();send(host,{t:'host',system:'nes',rom:'test.nes',core:'nes'});await message(host,'hosting');
+    const a=await connect(true);send(a,{t:'guest',id:'ejs-a'});assert.equal((await message(a,'game')).game.analog,undefined);await message(host,'peer');
+    send(host,{t:'vpad',slot:0,b:1,x:5});send(host,{t:'vpad',slot:0,release:true});
+    await pause();assert.deepEqual(vpad.calls,[]);
+    // Going from a stream to EmulatorJS releases what the stream held.
+    send(host,{t:'host',mode:'stream',name:'X'});await message(host,'hosting');
+    send(host,{t:'host',system:'nes',rom:'test.nes',core:'nes'});await message(host,'hosting');
+    assert.deepEqual(vpad.calls.map(c=>c[0]),['releaseAll','releaseAll']);
+    vpad.calls.length=0;send(host,{t:'vpad',slot:0,b:1});await pause();assert.deepEqual(vpad.calls,[]);
+  } finally { await g.close(); }
+});
 test('Both websocket protocols coexist; EJS rejection/disconnect cannot remove another room',async()=>{
   const a=await sio(),b=await sio(),c=await sio(),d=await sio(),rejected=await sio();
   assert.deepEqual(await request(a,'open-room',data('one','a')),[false]);

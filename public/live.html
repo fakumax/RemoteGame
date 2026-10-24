@@ -10,10 +10,12 @@
    nothing scrolls. Phones and tablets: video on top, touch pad, then the column. */
 #app{display:flex;flex-direction:column;min-height:100vh}
 #stage{padding:8px}
-#wrap{position:relative;width:100%;max-width:960px;aspect-ratio:4/3;margin:0 auto;background:#000;border-radius:8px;overflow:hidden}
+/* --ar: the picture's real proportion (a number); only a streamed native emulator sets it, the rest stay 4:3. */
+#wrap{position:relative;width:100%;max-width:960px;aspect-ratio:var(--ar,4/3);margin:0 auto;background:#000;border-radius:8px;overflow:hidden}
 #wrap:fullscreen{border-radius:0;max-width:none;aspect-ratio:auto}
-#frame{position:relative;height:100%;aspect-ratio:4/3;max-width:100%;margin:0 auto}
+#frame{position:relative;height:100%;aspect-ratio:var(--ar,4/3);max-width:100%;margin:0 auto}
 #screen{width:100%;height:100%;object-fit:contain;display:block;image-rendering:pixelated}
+body.native #screen{image-rendering:auto}
 #enter{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);color:#fff;font-size:20px;font-weight:700;border:0;cursor:pointer;width:100%}
 #side{padding:10px 12px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
 #side .panel{margin:0;padding:10px}
@@ -32,7 +34,7 @@
   body{height:100vh;height:100dvh;overflow:hidden}
   #app{flex-direction:row;height:100%;min-height:0}
   #stage{flex:1;min-width:0;min-height:0;display:flex;justify-content:center;align-items:center}
-  #wrap{width:min(100%,calc((100vh - 16px) * 4 / 3));width:min(100%,calc((100dvh - 16px) * 4 / 3));max-width:none;margin:0}
+  #wrap{width:min(100%,calc((100vh - 16px) * var(--ar,1.3333)));width:min(100%,calc((100dvh - 16px) * var(--ar,1.3333)));max-width:none;margin:0}
   #side{width:clamp(300px,24vw,360px);flex:none;overflow-y:auto;border-left:1px solid var(--line)}
 }
 /* Touch pad, only on phones/tablets */
@@ -70,9 +72,9 @@ body.touch #touch{display:grid}
 <div id="stage">
   <div id="wrap"><div id="frame"><video id="screen" autoplay playsinline muted></video></div><button id="enter">▶ Tocá para entrar con sonido</button></div>
   <div id="touch">
-    <div id="shoulders"><button data-code="KeyQ">L</button><button data-code="KeyW">R</button></div>
+    <div id="shoulders"><button data-code="KeyQ" data-label="l">L</button><button data-code="KeyW" data-label="r">R</button></div>
     <div id="dpad"><i style="left:50%;top:16%">▲</i><i style="left:50%;top:84%">▼</i><i style="left:16%;top:50%">◀</i><i style="left:84%;top:50%">▶</i></div>
-    <div id="mid"><button data-code="ShiftLeft" data-label="select">SELECT</button><button data-code="Enter">START</button></div>
+    <div id="mid"><button data-code="ShiftLeft" data-label="select">SELECT</button><button data-code="Enter" data-label="start">START</button></div>
     <div id="face">
       <button data-code="KeyS" data-label="x" style="left:55px;top:0">X</button>
       <button data-code="KeyA" data-label="y" style="left:0;top:55px">Y</button>
@@ -111,7 +113,7 @@ body.touch #touch{display:grid}
   const track=RemotePads.padTracker();
   let live=[];
   const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
-  let ws=null, rtc=null, player=0, roomFull=false, analog=false, seq=0, last=null, lastSent=0, keys={};
+  let ws=null, rtc=null, player=0, roomFull=false, analog=false, native=false, seq=0, last=null, lastSent=0, keys={};
 
   const GAME_KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','ShiftLeft','ShiftRight','KeyZ','KeyX','KeyA','KeyS','KeyQ','KeyW'];
   // The arrows and Space must never scroll the page, wherever the focus is.
@@ -162,12 +164,23 @@ body.touch #touch{display:grid}
     hitTest();
   };
   for(const type of ['pointerdown','pointermove','pointerup','pointercancel'])addEventListener(type,onFinger,{passive:false});
-  // Neo Geo/arcade: name the buttons like the cabinet.
-  function labelButtons(core){
-    const arcade=core==='fbneo'||core==='mame2003';
-    const names=arcade?{b:'A',a:'B',y:'C',x:'D',select:'COIN'}:{b:'B',a:'A',y:'Y',x:'X',select:'SELECT'};
+  // Neo Geo/arcade: name the buttons like the cabinet; a streamed native emulator: like an Xbox pad
+  // (same positions: bottom A, right B, left X, top Y).
+  function labelButtons(core,native){
+    const arcade=core==='fbneo'||core==='mame2003'||core==='mame2003_plus';
+    const names=native?{b:'A',a:'B',y:'X',x:'Y',select:'VIEW',start:'MENÚ',l:'LB',r:'RB'}
+      :arcade?{b:'A',a:'B',y:'C',x:'D',select:'COIN',start:'START',l:'L',r:'R'}:{b:'B',a:'A',y:'Y',x:'X',select:'SELECT',start:'START',l:'L',r:'R'};
     for(const b of document.querySelectorAll('#touch [data-label]'))b.textContent=names[b.dataset.label];
   }
+  // The picture's real proportion (a capture can be 16:9, 4:3, a window...); everything else is 4:3.
+  function fit(){
+    const w=video.videoWidth, h=video.videoHeight;
+    const ratio=native?(w&&h?Math.max(1,Math.min(2.4,w/h)):16/9):0;
+    if(ratio)wrap.style.setProperty('--ar',ratio.toFixed(4));else wrap.style.removeProperty('--ar');
+    document.body.classList.toggle('native',native);
+  }
+  video.addEventListener('loadedmetadata',fit);
+  video.addEventListener('resize',fit);
 
   // Controls travel as full state: a lost packet is fixed by the next one.
   function poll(){
@@ -176,8 +189,8 @@ body.touch #touch{display:grid}
     if(!rtc||!rtc.isOpen())return;
     const now=RemotePads.readGuest(Object.assign({},keys,touch),live,analog);
     const t=performance.now();
-    if(last&&now.b===last.b&&now.x===last.x&&now.y===last.y&&t-lastSent<50)return;
-    rtc.send({t:'pad',s:++seq,b:now.b,x:now.x,y:now.y});
+    if(last&&now.b===last.b&&now.x===last.x&&now.y===last.y&&now.rx===last.rx&&now.ry===last.ry&&t-lastSent<50)return;
+    rtc.send({t:'pad',s:++seq,b:now.b,x:now.x,y:now.y,rx:now.rx,ry:now.ry});
     last=now;lastSent=t;
   }
   setInterval(poll,4);
@@ -270,7 +283,10 @@ body.touch #touch{display:grid}
         roomFull=false;
         if(m.player)setPlayer(m.player);
         if(!m.game){stopRtc();$('title').textContent='';setStatus('Esperando que el anfitrión abra un juego…');return;}
-        analog=m.game.core==='n64';$('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core);crt.setCore(m.game.core);
+        // analog: both sticks go to the host. A streamed native emulator announces it (and gets Xbox labels,
+        // the capture's own proportion and its own CRT pick, off at first); N64 is analog by core.
+        native=!!m.game.analog;analog=native||m.game.core==='n64';
+        $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native);crt.setCore(m.game.core);fit();
         setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
       } else if(m.t==='host-left'){stopRtc();setStatus('El anfitrión está cambiando de juego…');}
       else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}

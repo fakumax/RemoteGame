@@ -39,6 +39,7 @@
 }
 </style>
 <script src="/webrtc.js"></script>
+<script src="/host.js"></script>
 <script src="/pads.js"></script>
 <script src="/share.js"></script>
 <script src="/crt.js"></script>
@@ -194,26 +195,20 @@
 
   // Online: this tab emulates and streams video+audio to up to 3 guests (P2-P4, seats 0-2);
   // each guest sends only its controls, which go to EmulatorJS player seat+1 (P1 is player 0).
+  // The connections, ping and the room live in host.js; here only what is specific to EmulatorJS.
   async function startHost(system,file,core,status){
-    let video=null, audio=null, scale=1, ws=null, replaced=false, note='';
-    const guests=new Map(); // seat -> { rtc, lastSeq, remote, open, ms, fps, sent }
-    const ping=RemoteHUD.ping($('fsbox'));
-    RemoteShare.banner($('links'));
-    const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
-    const label=seat=>'P'+(seat+2), names=seats=>seats.map(label).join(', ');
+    let video=null, audio=null, scale=1, host=null;
 
     // Tap every connection to the speakers so the game audio can be streamed as well.
     const connect=AudioNode.prototype.connect;
     AudioNode.prototype.connect=function(target,...rest){
       if(target instanceof AudioDestinationNode){
         const ctx=target.context;
-        if(!ctx.remoteTap){ctx.remoteTap=ctx.createMediaStreamDestination();audio=ctx.remoteTap.stream.getAudioTracks()[0];setTracks();}
+        if(!ctx.remoteTap){ctx.remoteTap=ctx.createMediaStreamDestination();audio=ctx.remoteTap.stream.getAudioTracks()[0];host&&host.setTracks();}
         connect.call(this,ctx.remoteTap);
       }
       return connect.call(this,target,...rest);
     };
-    // The same video and audio tracks feed every guest's connection (each one encodes on its own).
-    const setTracks=()=>{for(const g of guests.values())g.rtc.setTracks(video,audio,scale);};
     startHooks.push(()=>{
       const canvas=window.EJS_emulator&&EJS_emulator.canvas;
       if(canvas&&canvas.captureStream){
@@ -221,93 +216,20 @@
         video=canvas.captureStream().getVideoTracks()[0];
         // The canvas is the game upscaled (e.g. 960x720 for 320x240): send the native size.
         scale=Math.max(1,Math.floor(canvas.height/(core==='n64'?480:240)));
-        setTracks();
+        host&&host.setTracks();
       }
       else status.textContent='Este navegador no puede transmitir el juego.';
     });
-
-    // What the host sees: who is still connecting and the last thing that happened (who is in, with
-    // their ping and fps, is the list above; the banner counts them).
-    function refresh(next){
-      if(next!==undefined)note=next;
-      const wait=[...guests.keys()].sort().filter(s=>!guests.get(s).open);
-      const lines=[];
-      if(note)lines.push(note);
-      if(wait.length)lines.push(names(wait)+(wait.length>1?' entraron':' entró')+', conectando video…');
-      status.textContent=lines.join('\n');
-      drawPeers();
-    }
-    // One row per connected guest: ping (coloured by quality) and the fps that reaches them.
-    function drawPeers(){
-      const box=$('peers');box.textContent='';
-      for(const seat of [...guests.keys()].sort()){
-        const g=guests.get(seat);if(!g.open)continue;
-        const row=document.createElement('div');row.className='peer';
-        const who=document.createElement('b');who.textContent=label(seat);
-        const ms=document.createElement('span');ms.textContent=g.ms==null?'… ms':Math.round(g.ms)+' ms';if(g.ms!=null)ms.className=RemoteHUD.quality(g.ms);
-        const fps=document.createElement('span');fps.className='mut';fps.title='Cuadros por segundo que le llegan';fps.textContent=g.fps==null?'… fps':Math.round(g.fps)+' fps';
-        row.append(who,ms,fps);box.append(row);
-      }
-    }
-    // Video frames sent to each guest in the last second, from its own connection's stats.
-    setInterval(()=>{
-      for(const g of guests.values()){
-        if(!g.open||!g.rtc.pc)continue;
-        g.rtc.pc.getStats().then(report=>{
-          report.forEach(r=>{
-            if(r.type!=='outbound-rtp'||r.kind!=='video')return;
-            const now=performance.now();
-            if(g.sent)g.fps=(r.framesSent-g.sent.n)*1000/(now-g.sent.t);
-            g.sent={n:r.framesSent,t:now};
-          });
-          drawPeers();
-        }).catch(()=>{});
-      }
-    },1000);
-    const wsSend=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
     const simulate=seat=>(index,value)=>{try{EJS_emulator.gameManager.simulateInput(seat+1,index,value);}catch(e){}};
-    const release=(seat,g)=>{RemotePads.applyGuest(g.remote,RemotePads.EMPTY,simulate(seat));g.remote=RemotePads.EMPTY;};
-    function closeGuest(seat){
-      const g=guests.get(seat);
-      if(!g)return;
-      g.rtc.close();release(seat,g);guests.delete(seat);ping.hide(label(seat));
-    }
-
-    function startRtc(seat){
-      closeGuest(seat);
-      const g={rtc:null,lastSeq:-1,remote:RemotePads.EMPTY,open:false,ms:null,fps:null,sent:null};
-      guests.set(seat,g);
-      g.rtc=new RemoteWebRTC({
-        isHost:true,media:true,iceServers,
-        sendSignal:data=>wsSend({t:'signal',to:seat,data}),
-        onOpen:()=>{g.open=true;refresh('');},
-        onClose:()=>{g.open=false;release(seat,g);ping.hide(label(seat));drawPeers();},
-        onPing:rtt=>{g.ms=rtt;ping.set(rtt,label(seat));drawPeers();},
-        onMessage:m=>{
-          if(!m||m.t!=='pad'||!Number.isInteger(m.s)||m.s<=g.lastSeq)return;
-          g.lastSeq=m.s;
-          const next={b:(m.b|0)&0xffff,x:Math.max(-127,Math.min(127,m.x|0)),y:Math.max(-127,Math.min(127,m.y|0))};
-          RemotePads.applyGuest(g.remote,next,simulate(seat));g.remote=next;
-        }
-      });
-      g.rtc.start().then(()=>g.rtc.setTracks(video,audio,scale));
-    }
-
-    await new Promise((resolve,reject)=>{
-      ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
-      // One permanent room: opening this game makes it the one the guests see.
-      ws.onopen=()=>{wsSend({t:'host',system,rom:file,core});resolve();};
-      ws.onerror=()=>reject(new Error('No se pudo conectar con el servidor.'));
-      ws.onclose=()=>{if(!replaced)status.textContent='⚠️ Se perdió la conexión con el servidor. Recargá la página.';};
-      ws.onmessage=ev=>{
-        let m;try{m=JSON.parse(ev.data);}catch{return;}
-        if(m.t==='hosting'){if(m.name)window.setGameTitle(m.name);refresh('Tocá Start Game para empezar.');}
-        else if(m.t==='peer'&&Number.isInteger(m.slot)){note='';startRtc(m.slot);refresh();}
-        else if(m.t==='signal'){const g=guests.get(m.from);g&&g.rtc.handleSignal(m.data);}
-        else if(m.t==='peer-left'&&Number.isInteger(m.slot)){closeGuest(m.slot);refresh(label(m.slot)+' salió. Puede volver con el mismo link.');}
-        else if(m.t==='replaced'){replaced=true;for(const seat of [...guests.keys()])closeGuest(seat);status.textContent='Abriste otro juego en otra pestaña y tus amigos ahora ven ese. Cerrá esta pestaña.';}
-        else if(m.t==='error'){status.textContent='❌ '+m.msg;}
-      };
+    host=await RemoteHost.start({
+      hello:{t:'host',system,rom:file,core},
+      els:{status,peers:$('peers'),links:$('links'),pingBox:$('fsbox')},
+      getTracks:()=>({video,audio,scale}),
+      onPad:(seat,next,prev)=>RemotePads.applyGuest(prev,next,simulate(seat)),
+      onRelease:(seat,prev)=>RemotePads.applyGuest(prev,RemotePads.EMPTY,simulate(seat)),
+      onHosting:m=>{if(m.name)window.setGameTitle(m.name);},
+      hostingNote:'Tocá Start Game para empezar.',
+      replacedText:'Abriste otro juego en otra pestaña y tus amigos ahora ven ese. Cerrá esta pestaña.'
     });
   }
 })();

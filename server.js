@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
 const { WebSocketServer } = require('ws');
+const { createVpad } = require('./vpad');
 
 let cfg = { port: 3000 };
 try {
@@ -38,6 +39,10 @@ const LOCAL_ROMS = path.resolve(options.localRoms || path.join(__dirname, 'roms'
 const LAUNCHBOX = path.resolve(options.launchBoxDir || process.env.LAUNCHBOX_DIR || path.join(os.homedir(), 'LaunchBox'));
 fs.mkdirSync(LOCAL_ROMS, { recursive: true });
 const game = { publicUrl: null };
+// Virtual pads for emulators on this PC: DSU server on 127.0.0.1:26760 (Eden) and a keyboard helper (MAME).
+// Under `node --test` they stay off the real port and never start PowerShell, whatever a test creates.
+const testing = !!process.env.NODE_TEST_CONTEXT;
+game.vpad = options.vpad || createVpad({ dsuPort: options.dsuPort ?? (testing ? 0 : cfg.dsuPort), keys: options.keys ?? !testing, keyTargets: options.keyTargets || cfg.keyTargets });
 
 // Sistemas. dir de GAMES = lectura. Solo 'subidos' permite escritura.
 const SYSTEMS = {
@@ -905,6 +910,8 @@ function lanAddresses() {
   }
   return out;
 }
+// What the virtual pads are doing (DSU port and clients, keyboard helper, seats). Only this PC.
+app.get('/api/vpad', (req, res) => fromThisPc(req) ? res.json(game.vpad.status()) : res.status(403).json({ ok: false, msg: 'no permitido' }));
 app.get('/api/info', (req, res) => {
   const port = server.address()?.port || PORT;
   res.json({ port, gamesRoot: fromThisPc(req) ? GAMES_ROOT : undefined, version: '0.5.0', build: BUILD, lanUrls: lanUrls(), publicUrl: game.publicUrl || null });
@@ -984,15 +991,25 @@ wss.on('connection', ws => {
     if (m.t === 'host') {
       // Only a page opened on this PC can host: the tunnel must not let anyone take over.
       if (!ws.local) return send(ws, { t: 'error', msg: 'Solo la PC anfitriona puede abrir juegos' });
-      const system = String(m.system || '');
-      const sys = getSys(system);
-      const rom = safeFile(m.rom);
-      const core = String(m.core || '');
-      if (!sys || !rom || !/^[a-z0-9]{1,20}$/.test(core) || !sys.exts.includes(path.extname(rom).toLowerCase()) || !fs.existsSync(path.join(sys.dir, rom))) return send(ws, { t: 'error', msg: 'Juego inválido o inexistente' });
+      let info;
+      if (m.mode === 'stream') {
+        // A native emulator on this PC, captured as video: no ROM; the guests' pads go to the virtual pads (vpad).
+        const name = typeof m.name === 'string' ? m.name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+        info = { mode: 'stream', core: 'native', analog: true, name: name || 'Juego de la PC' };
+      } else {
+        const system = String(m.system || '');
+        const sys = getSys(system);
+        const rom = safeFile(m.rom);
+        const core = String(m.core || '');
+        if (!sys || !rom || !/^[a-z0-9]{1,20}$/.test(core) || !sys.exts.includes(path.extname(rom).toLowerCase()) || !fs.existsSync(path.join(sys.dir, rom))) return send(ws, { t: 'error', msg: 'Juego inválido o inexistente' });
+        info = { system, rom, core, name: gameInfo(sys, rom).name };
+      }
       // Opening another game (or reloading) replaces the previous host page.
       if (party.host && party.host !== ws) { party.host.partyRole = null; send(party.host, { t: 'replaced' }); }
+      // A different host or game: nothing the guests held on the virtual pads may stay pressed.
+      if (party.host) vpadDo(v => v.releaseAll());
       party.host = ws; ws.partyRole = 'host';
-      party.game = { system, rom, core, name: gameInfo(sys, rom).name };
+      party.game = info;
       send(ws, { t: 'hosting', guest: guestSlots().length > 0, slots: guestSlots(), name: party.game.name });
       party.guests.forEach((guest, slot) => {
         if (!guest) return;
@@ -1018,7 +1035,7 @@ wss.on('connection', ws => {
         if (slot < 0) return send(ws, { t: 'full' });
       }
       const old = party.guests[slot];
-      if (old && old !== ws) { old.partyRole = null; send(old, { t: 'replaced' }); }
+      if (old && old !== ws) { old.partyRole = null; send(old, { t: 'replaced' }); vpadDo(v => v.release(slot)); }
       party.guests[slot] = ws; party.held[slot] = null;
       ws.partyRole = 'guest'; ws.guestId = id; ws.slot = slot;
       send(ws, { t: 'game', game: party.host ? party.game : null, player: slot + 2 });
@@ -1030,6 +1047,18 @@ wss.on('connection', ws => {
     if (ws.partyRole && m.t === 'signal' && m.data) {
       if (ws.partyRole === 'guest') return send(party.host, { t: 'signal', from: ws.slot, data: m.data });
       return send(Number.isInteger(m.to) ? party.guests[m.to] : null, { t: 'signal', data: m.data });
+    }
+    // Stream mode only: the host page relays a guest's pad to its virtual pad. Nobody else may, and an
+    // EmulatorJS host never does (its guests are read inside the page).
+    if (m.t === 'vpad') {
+      if (ws !== party.host || party.game?.mode !== 'stream') return;
+      const slot = m.slot;
+      if (!Number.isInteger(slot) || slot < 0 || slot > 2) return;
+      if (m.release) return vpadDo(v => v.release(slot));
+      if (!party.guests[slot]) return;   // the guest is gone: a late packet must not bring its pad back
+      const axis = v => Math.max(-127, Math.min(127, Math.round(Number(v)) || 0));
+      const state = { b: (Number(m.b) | 0) & 0xffff, x: axis(m.x), y: axis(m.y), rx: axis(m.rx), ry: axis(m.ry) };
+      return vpadDo(v => v.update(slot, state));
     }
     if (m.t === 'create') {
       if (ws.room) return send(ws, { t: 'error', msg: 'Ya estás en una sala' });
@@ -1086,13 +1115,17 @@ wss.on('connection', ws => {
 // The party: one permanent link, up to 3 guests (P2-P4, seats 0-2), whatever game the host opens.
 const party = { host: null, guests: [null, null, null], held: [null, null, null], game: null };
 const guestSlots = () => party.guests.flatMap((g, slot) => g ? [slot] : []);
+// The virtual pads (game.vpad, from vpad.js or options.vpad) may be missing or fail: the party goes on.
+const vpadDo = fn => { try { if (game.vpad) fn(game.vpad); } catch (e) { console.log('vpad: ' + e.message); } };
 function leaveParty(ws) {
   if (ws.partyRole === 'host' && party.host === ws) {
     party.host = null;
+    vpadDo(v => v.releaseAll());
     for (const guest of party.guests) send(guest, { t: 'host-left' });
   } else if (ws.partyRole === 'guest' && party.guests[ws.slot] === ws) {
     party.guests[ws.slot] = null;
     party.held[ws.slot] = { id: ws.guestId, until: Date.now() + 15000 };
+    vpadDo(v => v.release(ws.slot));
     send(party.host, { t: 'peer-left', slot: ws.slot });
   }
   ws.partyRole = null;
@@ -1176,12 +1209,13 @@ async function close() {
   await new Promise(resolve => netplay.io.close(resolve));
   if (server.listening) await new Promise(resolve => server.close(resolve));
   lrAbort.abort();
+  await game.vpad.close?.();
   await Promise.all([...lrBusy.values()]);
   try { if (lbDb) lbDb.close(); } catch (e) {}
   lbDb = null;
 }
 const lanUrls = () => lanAddresses().map(ip => 'http://' + ip + ':' + (server.address()?.port || PORT));
-return Object.assign(game, { app, server, wss, rooms, party, netplay, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]) });
+return Object.assign(game, { app, server, wss, rooms, party, netplay, vpad: game.vpad, close, lanUrls, tunnel, coversReady: () => Promise.all([...lrBusy.values()]) });
 }
 function openBrowser(url) {
   require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();

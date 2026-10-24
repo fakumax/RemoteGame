@@ -8,6 +8,10 @@
 <script src="/share.js"></script>
 <style>
 main.wide{max-width:1560px}
+.streambar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.streambtn{display:inline-block;padding:9px 16px;background:#2a3050;color:var(--txt);border:1px solid var(--line);border-radius:10px;font-size:14px;font-weight:600;text-decoration:none}
+.streambtn:hover{border-color:var(--acc)}
+.streambar span{font-size:12px;color:var(--mut)}
 .party{margin-top:2px}
 .party summary{cursor:pointer;font-size:13px;color:var(--mut);padding:6px 0;user-select:none}
 .party summary b{color:var(--txt);margin-left:4px}
@@ -96,6 +100,7 @@ main.wide{max-width:1560px}
 <main class="wide">
   <div id="info"></div>
 
+  <div class="streambar"><a class="streambtn" href="/stream.html">📺 Transmitir un emulador</a><span>Mostrale a tus amigos MAME, Eden, Flycast o RetroArch, que corren en esta PC</span></div>
   <details class="party" id="partyBox">
     <summary>👥 Jugar con un amigo <b id="partyState"></b></summary>
     <div class="panel kbd" id="party">Cargando…</div>

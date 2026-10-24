@@ -9,6 +9,19 @@
     try { receiver.jitterBufferTarget = 0; } catch (e) {}
     try { receiver.playoutDelayHint = 0; } catch (e) {}
   }
+  // Puts one video codec first in a transceiver's list ('h264', 'vp9'...); false if it is not available.
+  // Only counts before the offer is made: after that the codec is already negotiated.
+  function preferCodec(transceiver, codec) {
+    try {
+      const caps = typeof RTCRtpSender !== 'undefined' && RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
+      if (!codec || !caps || !transceiver || !transceiver.setCodecPreferences) return false;
+      const mime = 'video/' + String(codec).toLowerCase();
+      const want = caps.codecs.filter(c => String(c.mimeType).toLowerCase() === mime);
+      if (!want.length) return false;
+      transceiver.setCodecPreferences(want.concat(caps.codecs.filter(c => !want.includes(c))));
+      return true;
+    } catch (e) { return false; }
+  }
 
   class RemoteWebRTC {
     constructor(options = {}) {
@@ -23,8 +36,11 @@
       // Host streaming: send-only video/audio transceivers whose tracks are swapped in later.
       this.media = !!options.media;
       this.iceServers = options.iceServers || ICE_SERVERS;
+      this.codec = options.codec || null;
       this.videoSender = null;
       this.audioSender = null;
+      this.videoTransceiver = null;
+      this.applied = null;
 
       this.pc = null;
       this.dc = null;
@@ -125,7 +141,10 @@
         const dc = this.pc.createDataChannel('netplay', { ordered: false, maxRetransmits: 0 });
         this.hookChannel(dc);
         if (this.media) {
-          this.videoSender = this.pc.addTransceiver('video', { direction: 'sendonly' }).sender;
+          this.videoTransceiver = this.pc.addTransceiver('video', { direction: 'sendonly' });
+          this.videoSender = this.videoTransceiver.sender;
+          // Before the offer: the order of the codecs is what gets negotiated. Without it, whatever the browser prefers.
+          if (this.codec) preferCodec(this.videoTransceiver, this.codec);
           this.audioSender = this.pc.addTransceiver('audio', { direction: 'sendonly' }).sender;
         }
 
@@ -177,20 +196,31 @@
     }
 
     // Tracks can arrive before or after the connection; replaceTrack avoids renegotiation.
-    // scaleDown: canvas pixels per game pixel, so the stream goes out at the game's native size.
-    async setTracks(video, audio, scaleDown = 1) {
+    // opts: { scale, maxBitrate, codec }; a plain number is the scale (older callers).
+    //   scale: canvas pixels per game pixel, so the stream goes out at the game's native size.
+    //   maxBitrate: bits per second (8 Mbps by default; a screen capture asks for ~15 Mbps).
+    //   codec: e.g. 'h264'. It only counts before the offer, so it is best given to the constructor.
+    // Calling again with other values re-applies the encoder parameters (no renegotiation).
+    async setTracks(video, audio, opts = {}) {
       if (!this.pc || !this.videoSender) return;
+      if (typeof opts === 'number') opts = { scale: opts };
+      const scale = Math.max(1, Number(opts.scale) || 1);
+      const maxBitrate = Math.max(100000, Number(opts.maxBitrate) || 8000000);
       try {
-        if (video && this.videoSender.track !== video) {
-          video.contentHint = 'motion';
-          await this.videoSender.replaceTrack(video);
+        if (opts.codec && !this.codec && !this.pc.localDescription) { this.codec = opts.codec; preferCodec(this.videoTransceiver, opts.codec); }
+        const swapped = video && this.videoSender.track !== video;
+        if (swapped) { video.contentHint = 'motion'; await this.videoSender.replaceTrack(video); }
+        const key = scale + '|' + maxBitrate;
+        if (this.videoSender.track && (swapped || this.applied !== key)) {
           const params = this.videoSender.getParameters();
+          // Keep the frames and let the resolution give way when the network is short.
           params.degradationPreference = 'maintain-framerate';
           if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-          params.encodings[0].maxBitrate = 8000000;
+          params.encodings[0].maxBitrate = maxBitrate;
           params.encodings[0].maxFramerate = 60;
-          params.encodings[0].scaleResolutionDownBy = Math.max(1, scaleDown);
+          params.encodings[0].scaleResolutionDownBy = scale;
           await this.videoSender.setParameters(params);
+          this.applied = key;
         }
         if (audio && this.audioSender.track !== audio) await this.audioSender.replaceTrack(audio);
       } catch (e) {}
@@ -223,8 +253,11 @@
       this.pendingCandidates = [];
       this.videoSender = null;
       this.audioSender = null;
+      this.videoTransceiver = null;
+      this.applied = null;
     }
   }
+  RemoteWebRTC.preferCodec = preferCodec;
 
   if (typeof module !== 'undefined') module.exports = RemoteWebRTC;
   else root.RemoteWebRTC = RemoteWebRTC;

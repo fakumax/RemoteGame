@@ -66,6 +66,61 @@ Hay **una sola sala, permanente, para hasta 3 amigos** (P2, P3 y P4; vos sos P1)
 
 `public/play.html` conserva el modo NES por lockstep (cada navegador emula y solo viajan los botones), ya no enlazado desde la biblioteca.
 
+## Transmitir un emulador de la PC
+
+Para los juegos que no corren en el navegador: Switch con Eden, Dreamcast con Flycast, arcades pesados con MAME, lo que abras en RetroArch. Abrís el emulador de tu PC y jugás con tu propio mando; RemoteGame captura su ventana (o la pantalla) con `getDisplayMedia` y la transmite por el mismo WebRTC de siempre a hasta 3 amigos. **Para ellos no cambia nada:** el mismo link de la sala (`/sala`), su joystick, teclado o celu, y nada para instalar.
+
+1. Abrí el emulador y el juego en esta PC.
+2. En la biblioteca tocá **📺 Transmitir un emulador** (o abrí `http://localhost:3000/stream.html`; tiene que ser `localhost`, el navegador solo deja capturar la pantalla desde ahí).
+3. Si querés, escribí **¿A qué juegan?** (es el nombre que ven tus amigos; por defecto, *Juego de la PC*) y tocá **Elegir ventana o pantalla**. Elegí la ventana del emulador o la pantalla completa.
+4. Pasales el link de siempre. Entran, ven lo que transmitís y juegan como P2, P3 y P4.
+5. Dejá el emulador al frente. La pestaña de RemoteGame puede quedar detrás, pero no la cierres, y la ventana capturada no puede estar minimizada (el navegador deja de recibir cuadros). Si se corta la captura, la página lo avisa y el botón vuelve a elegir.
+
+- **Audio:** capturando una ventana no hay audio. Para que tus amigos escuchen, **compartí la pantalla completa y marcá "Compartir audio del sistema"** (Chrome o Edge en Windows). Se manda todo lo que suena en la PC; la vista previa de la página va sin sonido para que no haga eco.
+- **Controles:** **P1 es tu mando, que va directo al emulador** sin pasar por RemoteGame. P2–P4 son los invitados: sus botones y los dos sticks llegan a esta PC como mandos virtuales. En el celu los botones de la pantalla tienen nombres de Xbox (A/B/X/Y) y la cruceta es digital, sin stick analógico.
+- **Video:** 60 cuadros por segundo, H.264 si el navegador lo tiene (si no, lo que haya) y hasta 15 Mbps por amigo; el selector **Calidad del video** de la página ofrece 8, 15 y 25 Mbps. Una pantalla de más de 1080p se achica a 1080p al enviarla. Con 3 amigos, contá con unos 45 Mbps de subida a 15 Mbps; si tu conexión no llega, bajá la calidad.
+- **En la pantalla de tus amigos:** la imagen respeta la proporción real de lo capturado (16:9, 4:3…), sin el efecto pixelado de los juegos web, y el filtro CRT arranca apagado. La elección de CRT en este modo se guarda aparte (`remotegame-crt-native`) y no pisa la que cada uno tiene para los juegos del navegador.
+- **Solo esta PC** puede transmitir: quien entra por el link del túnel no puede abrir `/stream.html` como anfitrión.
+
+### Configurar los emuladores para P2–P4
+
+**Mandos de tus amigos en emuladores de la PC (sin instalar nada).**
+
+Los botones de tus amigos (P2–P4) llegan a esta PC y RemoteGame se los entrega al emulador **sin drivers ni programas extra**: a Eden como "mandos UDP" (protocolo DSU/cemuhook) y a MAME como teclado simulado. Los dos andan solos al arrancar RemoteGame; `http://localhost:3000/api/vpad` (solo esta PC) muestra el estado: puerto UDP, clientes conectados, teclado y qué lugares están ocupados.
+
+**Eden (Switch 1)**
+
+RemoteGame escucha en `127.0.0.1:26760`, solo en tu PC. El pad 0 de ese servidor queda sin conectar (es el tuyo: usás tu mando de siempre en P1); P2 es el pad 1, P3 el pad 2 y P4 el pad 3.
+
+1. Abrí Eden y andá a **Emulación → Configurar → Controles**. Los nombres de los menús están tomados del código de Eden y pueden variar según la versión: confirmalo en la tuya.
+2. Tocá **Avanzado** y, en el grupo **Otros**, tildá **Habilitar mandos UDP (no hace falta para el movimiento)** (en inglés, *Enable UDP controllers (not needed for motion)*). Sin esa casilla los mandos UDP no aparecen en la lista.
+3. Mismo lugar, **Movimiento / Táctil → Configurar**: el servidor por defecto de Eden es justamente `127.0.0.1` puerto `26760`. Si no figura en la lista, escribilo y tocá **Agregar servidor** (el botón **Probar** avisa si llegan datos; hace falta que algún amigo ya esté jugando).
+4. Esperá a que tus amigos entren a la sala y, en **Jugador 2**, elegí como dispositivo de entrada **UDP Controller 1**; en **Jugador 3**, **UDP Controller 2**; en **Jugador 4**, **UDP Controller 3**. Eden numera los pads en la lista tal cual los manda el servidor.
+5. RemoteGame manda los botones como los de un DualShock 4, de forma posicional como en la sala: abajo = Cruz, derecha = Círculo, izquierda = Cuadrado, arriba = Triángulo, más cruceta, L1/R1, L2/R2, L3/R3, los dos sticks, Share (Select) y Options (Start). Si Eden no los asigna solo a los botones de Switch, asignalos a mano en esa misma pantalla (no verificado con Eden real).
+
+Notas: un mando UDP aparece en la lista de Eden recién cuando su lugar tiene un amigo jugando (si todavía no figura, esperá a que entre y reabrí la pantalla de Controles). Cuando el amigo se va, RemoteGame manda un último paquete repetido, que es la forma en que Eden da de baja un mando. El movimiento (giroscopio) va quieto. Si otro programa ya usa el puerto 26760 (por ejemplo DS4Windows), RemoteGame sigue andando y lo avisa en `/api/vpad`; el puerto se cambia con `dsuPort` en `config.json` (y en Eden, el mismo número). **Sin verificar con Eden real:** los nombres exactos de los menús y de los dispositivos dependen de la versión; lo que sí se probó es el protocolo con un cliente aparte.
+
+**MAME (suelto, arcades)**
+
+MAME no tiene mandos "virtuales": RemoteGame le *teclea* las teclas de cada jugador con `SendInput`.
+
+1. Agregá `-keyboardprovider win32` al lanzador, o escribí `keyboardprovider win32` en `mame.ini`. Hace falta porque por defecto MAME lee el teclado con `rawinput` y este descarta las teclas inyectadas por programa; con `win32` las ve ([documentación](https://docs.mamedev.org/commandline/commandline-all.html): "user-mode keyboard emulation tools [...] will almost certainly require the use of `-keyboardprovider win32`").
+2. Dejá la **ventana de MAME al frente**. RemoteGame solo teclea mientras la ventana en primer plano sea `mame.exe`; si cambiás de programa suelta todo y no escribe nada en el otro. Al volver a MAME, las teclas que sus amigos sigan apretando se retoman.
+3. Dejá **Bloq Num** activado: P4 usa el teclado numérico.
+4. Teclas de cada jugador (las de fábrica de MAME, [docs.mamedev.org/usingmame/defaultkeys.html](https://docs.mamedev.org/usingmame/defaultkeys.html), teclado ANSI de EE. UU.):
+
+| | Dirección (arriba, abajo, izq., der.) | Botones 1 a 6 | Start | Moneda |
+| --- | --- | --- | --- | --- |
+| P2 | `R` `F` `D` `G` | `A` `S` `Q` `W` `E` (el 6 no tiene tecla) | `2` | `6` |
+| P3 | `I` `K` `J` `L` | `Ctrl` der., `Shift` der., `Enter` (4 a 6 sin tecla) | `3` | `7` |
+| P4 | teclado numérico `8` `2` `4` `6` | `0`, `.`, `Enter` numérico (4 a 6 sin tecla) | `4` | `8` |
+
+La cruceta y el stick izquierdo (pasado el 50 %) son las direcciones. Los botones salen en orden arcade: B = 1, A = 2, Y = 3, X = 4, L = 5, R = 6; Select = moneda y Start = Start (las teclas `5` a `8` son las monedas 1 a 4, así que P2 usa la `6`, P3 la `7` y P4 la `8`). MAME solo trae tres botones de fábrica para P3 y P4; si tu juego usa más, asignalos en MAME (Tab → Configurar controles). Si dos jugadores comparten tecla en un juego de pantalla compartida (los P1 de doble stick usan `E S D F` e `I J K L`), cambiá las teclas en MAME.
+
+El programa se puede cambiar o ampliar con `keyTargets` en `config.json` (por ejemplo `["mame.exe", "flycast.exe", "retroarch.exe"]`). **Flycast y RetroArch:** probalos así, con el teclado, agregando su proceso a la lista y poniendo en cada uno las mismas teclas de arriba para los jugadores 2 a 4; todavía no están probados. Si no andan, quedan para más adelante.
+
+El teclado se usa solo si hay un invitado jugando: PowerShell arranca recién con el primer botón de un amigo, no al abrir RemoteGame. Fuera de Windows queda deshabilitado, y si PowerShell no puede arrancar, `/api/vpad` dice por qué y el resto sigue andando.
+
 ## ROMs y BIOS
 
 Los ZIP de arcade se entregan íntegros. En el modo NES propio se extrae el archivo `.nes` en memoria, con un límite de 16 MB descomprimidos. En Subidos, un ZIP requiere elegir el emulador; no se adivina que todos los ZIP sean NES.

@@ -137,9 +137,9 @@
     return '🎮 Ningún mando: conectalo y apretá cualquier botón';
   }
 
-  // Returns { b: bitmask of RetroPad 0-15, x, y: left stick in -127..127 }.
+  // Returns { b: bitmask of RetroPad 0-15, x, y: left stick, rx, ry: right stick, all in -127..127 }.
   function readGuest(keys, gamepads, analog) {
-    let b = 0, x = 0, y = 0;
+    let b = 0, x = 0, y = 0, rx = 0, ry = 0;
     for (const code in keys) if (keys[code] && CODES[code]) for (const i of CODES[code]) b |= 1 << i;
     for (const g of gamepads || []) {
       if (!g || !g.connected) continue;
@@ -147,8 +147,10 @@
       b |= s.b;
       if (s.x) x = s.x;
       if (s.y) y = s.y;
+      if (s.rx) rx = s.rx;
+      if (s.ry) ry = s.ry;
     }
-    return { b, x, y };
+    return { b, x, y, rx, ry };
   }
 
   // Host side: turns a state into EmulatorJS simulateInput calls, only for what changed.
