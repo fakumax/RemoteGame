@@ -7,8 +7,9 @@
     "start": "node server.js --open",
     "local": "node server.js --no-share",
     "netplay": "node netplay-node/index.js",
-    "test": "node --test",
-    "test:browser": "node scripts/smoke-browser.cjs"
+    "test": "node --test test/*.test.js",
+    "test:browser": "node scripts/smoke-browser.cjs",
+    "test:e2e": "node scripts/e2e-switch-controls.cjs"
   },
   "dependencies": {
     "adm-zip": "^0.6.1",
