@@ -61,18 +61,21 @@ body.touch #touch{display:grid}
 #face{position:relative;width:170px;height:170px;justify-self:end}
 #face button{position:absolute;width:60px;height:60px;border-radius:50%;font-size:18px}
 #shoulders{grid-column:1/-1;display:flex;justify-content:space-between}
+#shoulders span{display:flex;gap:8px}
 #shoulders button{width:90px;padding:10px;border-radius:10px}
-/* Phone in landscape: video fills the screen and the pad floats over it */
-@media (orientation:landscape) and (max-height:520px){
-  body.touch #side{display:none}
-  body.touch #app{display:block}
-  body.touch #stage{padding:0}
-  body.touch #wrap{position:fixed;inset:0;width:100vw;height:100vh;max-width:none;margin:0;border-radius:0;aspect-ratio:auto}
-  body.touch #touch{position:fixed;inset:0;margin:0;max-width:none;padding:12px 18px;align-items:end;pointer-events:none}
-  body.touch #touch>*{pointer-events:auto}
-  body.touch #shoulders{position:fixed;top:10px;left:18px;right:18px}
-  body.touch #dpad,body.touch #face button,body.touch #mid button,body.touch #shoulders button{opacity:.55}
-}
+/* The triggers (ZL/ZR, LT/RT) only exist for a streamed emulator; then four buttons share the row. */
+#shoulders .trig{display:none}
+body.native #shoulders .trig{display:block}
+body.native #shoulders button{width:72px}
+/* Phone in landscape, or a touch device in fullscreen (class "over", set by the script): the video fills the screen and the pad floats over it */
+body.touch.over #side{display:none}
+body.touch.over #app{display:block}
+body.touch.over #stage{padding:0}
+body.touch.over #wrap{position:fixed;inset:0;width:100vw;height:100vh;max-width:none;margin:0;border-radius:0;aspect-ratio:auto}
+body.touch.over #touch{position:fixed;inset:0;margin:0;max-width:none;padding:12px 18px;align-items:end;pointer-events:none}
+body.touch.over #touch>*{pointer-events:auto}
+body.touch.over #shoulders{position:fixed;top:10px;left:18px;right:18px}
+body.touch.over #dpad,body.touch.over #face button,body.touch.over #mid button,body.touch.over #shoulders button{opacity:.55}
 /* Phones and tablets: a short column under the pad. The network fixes itself (no Reconectar), the keyboard help does not apply,
    and the pad line shows up only when the browser sees a pad. */
 body.touch #head,body.touch #reconnect,body.touch #scan,body.touch #side details{display:none}
@@ -96,7 +99,7 @@ body.native .pick{display:none}
     <div id="flash"></div>
     <div id="quiet"><b>Abriste la sala en otra pestaña</b><span id="quietWhy">Seguí jugando ahí: esta quedó en silencio para que no se escuche doble ni compitan los controles.</span><button class="copy" id="takeover">Jugar desde esta pestaña</button></div></div>
   <div id="touch">
-    <div id="shoulders"><button data-code="KeyQ" data-label="l">L</button><button data-code="KeyW" data-label="r">R</button></div>
+    <div id="shoulders"><span><button data-code="KeyE" data-label="l2" class="trig">L2</button><button data-code="KeyQ" data-label="l">L</button></span><span><button data-code="KeyW" data-label="r">R</button><button data-code="KeyR" data-label="r2" class="trig">R2</button></span></div>
     <div id="dpad"><i style="left:50%;top:16%">▲</i><i style="left:50%;top:84%">▼</i><i style="left:16%;top:50%">◀</i><i style="left:84%;top:50%">▶</i></div>
     <div id="mid"><button data-code="ShiftLeft" data-label="select">SELECT</button><button data-code="Enter" data-label="start">START</button></div>
     <div id="face">
@@ -118,7 +121,7 @@ body.native .pick{display:none}
   <div class="pick"><label>Pantalla<select id="crt"></select></label></div>
   <div class="btns"><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="full">Pantalla completa</button></div>
   <details><summary>Controles</summary><div class="kbd" id="help">
-    <b>Tus controles (sos <span id="who">invitado</span>):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
+    <b>Tus controles (sos <span id="who">invitado</span>):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> L y R · <kbd>E</kbd> <kbd>R</kbd> L2 y R2 · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
     Mando: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D). Si no aparece, apretá un botón con esta pestaña enfocada.
   </div></details>
 </aside>
@@ -131,10 +134,31 @@ body.native .pick{display:none}
   const media=new MediaStream();
   const crt=RemoteCRT.attach($('frame'),$('crt'));
   // Buttons work right away, even while the network setup below is still loading.
-  $('enter').onclick=()=>{video.muted=false;video.play().catch(()=>{});$('enter').style.display='none';};
-  // Fullscreen on #wrap, not on the video: the CRT layer and the ping badge live inside it.
-  const wrap=$('wrap'), goFull=wrap.requestFullscreen||wrap.webkitRequestFullscreen;
-  if(goFull)$('full').onclick=()=>goFull.call(wrap);else $('full').style.display='none';
+  $('enter').onclick=()=>{video.muted=false;video.play().catch(()=>{});$('enter').style.display='none';if(isTouch()&&canFull)full();};
+  // Like a video player: on a phone, touching the picture goes fullscreen.
+  video.addEventListener('click',()=>{if(isTouch()&&canFull)full();});
+  // Fullscreen. On a computer, #wrap (not the video: the CRT layer and the ping badge live inside it). On a phone or tablet, the
+  // whole page, so the touch pad floats over the picture, turned to landscape like a video player (Android; iOS cannot lock the
+  // orientation, and an iPhone has no fullscreen for a page: there, turning the phone gives the same layout).
+  const wrap=$('wrap'), isTouch=()=>document.body.classList.contains('touch');
+  const fsNow=()=>document.fullscreenElement||document.webkitFullscreenElement;
+  const canFull=!!(wrap.requestFullscreen||wrap.webkitRequestFullscreen);
+  function full(){
+    if(fsNow())return;
+    const el=isTouch()?document.documentElement:wrap, go=el.requestFullscreen||el.webkitRequestFullscreen;
+    Promise.resolve(go.call(el)).then(()=>{if(isTouch()&&screen.orientation&&screen.orientation.lock)return screen.orientation.lock('landscape');}).catch(()=>{});
+  }
+  if(canFull)$('full').onclick=full;else $('full').style.display='none';
+  // The pad over the picture: a phone in landscape, or fullscreen on a touch device.
+  const landscape=matchMedia('(orientation:landscape) and (max-height:520px)');
+  let autoFull=true;   // turning the phone to landscape asks for fullscreen on the next touch, once per turn (leaving it is respected)
+  function over(){
+    document.body.classList.toggle('over',isTouch()&&(landscape.matches||!!fsNow()));
+    if(!landscape.matches&&!fsNow())autoFull=true;
+  }
+  landscape.addEventListener('change',over);
+  document.addEventListener('fullscreenchange',()=>{if(!fsNow())autoFull=false;over();});
+  document.addEventListener('webkitfullscreenchange',over);
   const ping=RemoteHUD.ping(wrap);
   const track=RemotePads.padTracker();
   let live=[];
@@ -158,6 +182,7 @@ body.native .pick{display:none}
   let touch={};
   const fingers=new Map();
   if(matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0)document.body.classList.add('touch');
+  over();
   function hitTest(){
     const next={};
     const dpad=$('dpad').getBoundingClientRect();
@@ -189,16 +214,19 @@ body.native .pick{display:none}
     if(e.pointerType==='mouse'||!e.target.closest('#touch'))return;
     e.preventDefault();
     if(e.type==='pointerup'||e.type==='pointercancel')fingers.delete(e.pointerId);
+    // Lifting a finger is a user gesture: a phone just turned to landscape goes fullscreen here, once.
+    if(e.type==='pointerup'&&autoFull&&landscape.matches&&canFull&&!fsNow()){autoFull=false;full();}
     else fingers.set(e.pointerId,{x:e.clientX,y:e.clientY});
     hitTest();
   };
   for(const type of ['pointerdown','pointermove','pointerup','pointercancel'])addEventListener(type,onFinger,{passive:false});
-  // Neo Geo/arcade: name the buttons like the cabinet; a streamed native emulator: like an Xbox pad
-  // (same positions: bottom A, right B, left X, top Y).
-  function labelButtons(core,native){
+  // Neo Geo/arcade: name the buttons like the cabinet; Switch (Eden): like its pad (the same positions as a SNES: bottom B,
+  // right A; select and start are − and +); any other streamed emulator: like an Xbox pad (bottom A, right B, left X, top Y).
+  function labelButtons(core,native,system){
     const arcade=core==='fbneo'||core==='mame2003'||core==='mame2003_plus';
-    const names=native?{b:'A',a:'B',y:'X',x:'Y',select:'VIEW',start:'MENÚ',l:'LB',r:'RB'}
-      :arcade?{b:'A',a:'B',y:'C',x:'D',select:'COIN',start:'START',l:'L',r:'R'}:{b:'B',a:'A',y:'Y',x:'X',select:'SELECT',start:'START',l:'L',r:'R'};
+    const names=native&&system==='switch'?{b:'B',a:'A',y:'Y',x:'X',select:'−',start:'+',l:'L',r:'R',l2:'ZL',r2:'ZR'}
+      :native?{b:'A',a:'B',y:'X',x:'Y',select:'VIEW',start:'MENÚ',l:'LB',r:'RB',l2:'LT',r2:'RT'}
+      :arcade?{b:'A',a:'B',y:'C',x:'D',select:'COIN',start:'START',l:'L',r:'R',l2:'L2',r2:'R2'}:{b:'B',a:'A',y:'Y',x:'X',select:'SELECT',start:'START',l:'L',r:'R',l2:'L2',r2:'R2'};
     for(const b of document.querySelectorAll('#touch [data-label]'))b.textContent=names[b.dataset.label];
   }
   // The picture's real proportion (a capture can be 16:9, 4:3, a window...); everything else is 4:3.
@@ -433,7 +461,7 @@ body.native .pick{display:none}
         // analog: both sticks go to the host. A streamed native emulator announces it (and gets Xbox labels,
         // the capture's own proportion and its own CRT pick, off at first); N64 is analog by core.
         native=!!m.game.analog;analog=native||m.game.core==='n64';
-        $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native);crt.setCore(m.game.core);fit();
+        $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native,m.game.system);crt.setCore(m.game.core);fit();
         if(native&&$('crt').value!=='off'){$('crt').value='off';$('crt').onchange();}   // its pick is hidden: an old choice must not stay on
         setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
       } else if(m.t==='host-left'){hasGame=false;stopRtc();setStatus('El anfitrión está cambiando de juego…');}

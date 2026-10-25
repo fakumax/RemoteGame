@@ -95,7 +95,8 @@
   RemoteShare.banner($('links'));
 
   const name=()=>gname.value.replace(/\s+/g,' ').trim().slice(0,60)||DEFAULT;
-  const hello=()=>({t:'host',mode:'stream',name:name()});
+  // ?from= is the system RemoteGame opened (switch, arcade): the guests' touch pad takes its button names.
+  const hello=()=>({t:'host',mode:'stream',name:name(),system:qs.get('from')||''});
   // A screen above 1080p goes out scaled down: 4K at 60 fps would drown the encoder and the upload.
   const scale=()=>{const w=video&&video.getSettings?video.getSettings().width:0;return w>1920?w/1920:1;};
   const tracks=()=>({video,audio,scale:scale(),maxBitrate:MBPS*1e6,codec:'h264'});

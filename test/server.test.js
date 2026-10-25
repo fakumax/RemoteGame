@@ -285,6 +285,10 @@ test('Stream: only this PC hosts a stream, without a ROM, and the guests are tol
     assert.equal((await (await fetch(url+'/api/party')).json()).game.mode,'stream');
     for(const name of [undefined,123,{a:1},'   '])send(host,{t:'host',mode:'stream',name});
     for(const name of [undefined,123,{a:1},'   '])assert.equal((await message(host,'hosting')).name,'Juego de la PC');
+    // The system RemoteGame opened goes along (the guests' touch pad names its buttons after it); an unknown one is left out.
+    send(host,{t:'host',mode:'stream',name:'Eden',system:'Switch'});await message(host,'hosting');
+    assert.equal(g.party.game.system,'switch');
+    for(const system of ['xbox','__proto__',{},'']){send(host,{t:'host',mode:'stream',name:'Eden',system});await message(host,'hosting');assert.equal('system' in g.party.game,false);}
     // A ROM-less normal host stays refused: only mode "stream" skips the ROM.
     send(host,{t:'host',system:'nes',core:'nes'});assert.match((await message(host,'error')).msg,/inválido/);
   } finally { await g.close(); }

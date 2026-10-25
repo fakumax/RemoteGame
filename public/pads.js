@@ -15,7 +15,7 @@
   };
   // A single player at a keyboard (online host and guest).
   const KEYS_SOLO = {
-    0: 'z', 8: 'x', 1: 'a', 9: 's', 10: 'q', 11: 'w', 2: 'shift', 3: 'enter',
+    0: 'z', 8: 'x', 1: 'a', 9: 's', 10: 'q', 11: 'w', 12: 'e', 13: 'r', 2: 'shift', 3: 'enter',
     4: 'up arrow', 5: 'down arrow', 6: 'left arrow', 7: 'right arrow'
   };
   // Two players sharing one keyboard: P1 on the left half, P2 on the right half.
