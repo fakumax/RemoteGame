@@ -214,18 +214,17 @@ body.native .pick{display:none}
     if(e.pointerType==='mouse'||!e.target.closest('#touch'))return;
     e.preventDefault();
     if(e.type==='pointerup'||e.type==='pointercancel')fingers.delete(e.pointerId);
+    else fingers.set(e.pointerId,{x:e.clientX,y:e.clientY});
     // Lifting a finger is a user gesture: a phone just turned to landscape goes fullscreen here, once.
     if(e.type==='pointerup'&&autoFull&&landscape.matches&&canFull&&!fsNow()){autoFull=false;full();}
-    else fingers.set(e.pointerId,{x:e.clientX,y:e.clientY});
     hitTest();
   };
   for(const type of ['pointerdown','pointermove','pointerup','pointercancel'])addEventListener(type,onFinger,{passive:false});
-  // Neo Geo/arcade: name the buttons like the cabinet; Switch (Eden): like its pad (the same positions as a SNES: bottom B,
-  // right A; select and start are − and +); any other streamed emulator: like an Xbox pad (bottom A, right B, left X, top Y).
-  function labelButtons(core,native,system){
+  // Neo Geo/arcade: name the buttons like the cabinet; a streamed native emulator (Switch too): like an Xbox pad, the kind
+  // of pad people play emulators with (same positions: bottom A, right B, left X, top Y).
+  function labelButtons(core,native){
     const arcade=core==='fbneo'||core==='mame2003'||core==='mame2003_plus';
-    const names=native&&system==='switch'?{b:'B',a:'A',y:'Y',x:'X',select:'−',start:'+',l:'L',r:'R',l2:'ZL',r2:'ZR'}
-      :native?{b:'A',a:'B',y:'X',x:'Y',select:'VIEW',start:'MENÚ',l:'LB',r:'RB',l2:'LT',r2:'RT'}
+    const names=native?{b:'A',a:'B',y:'X',x:'Y',select:'VIEW',start:'MENÚ',l:'LB',r:'RB',l2:'LT',r2:'RT'}
       :arcade?{b:'A',a:'B',y:'C',x:'D',select:'COIN',start:'START',l:'L',r:'R',l2:'L2',r2:'R2'}:{b:'B',a:'A',y:'Y',x:'X',select:'SELECT',start:'START',l:'L',r:'R',l2:'L2',r2:'R2'};
     for(const b of document.querySelectorAll('#touch [data-label]'))b.textContent=names[b.dataset.label];
   }
@@ -461,7 +460,7 @@ body.native .pick{display:none}
         // analog: both sticks go to the host. A streamed native emulator announces it (and gets Xbox labels,
         // the capture's own proportion and its own CRT pick, off at first); N64 is analog by core.
         native=!!m.game.analog;analog=native||m.game.core==='n64';
-        $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native,m.game.system);crt.setCore(m.game.core);fit();
+        $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native);crt.setCore(m.game.core);fit();
         if(native&&$('crt').value!=='off'){$('crt').value='off';$('crt').onchange();}   // its pick is hidden: an old choice must not stay on
         setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
       } else if(m.t==='host-left'){hasGame=false;stopRtc();setStatus('El anfitrión está cambiando de juego…');}

@@ -1320,7 +1320,6 @@ wss.on('connection', ws => {
         // A native emulator on this PC, captured as video: no ROM; the guests' pads go to the virtual pads (vpad).
         const name = typeof m.name === 'string' ? m.name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
         info = { mode: 'stream', core: 'native', analog: true, name: name || 'Juego de la PC' };
-        if (getSys(m.system)) info.system = String(m.system).toLowerCase();   // the guests' touch pad names its buttons after it
         if (Array.isArray(m.caps) && m.caps.includes('ack')) info.ack = true;
       } else {
         const system = String(m.system || '');
