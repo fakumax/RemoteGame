@@ -12,8 +12,11 @@ const AdmZip = require('adm-zip');
 const { WebSocketServer } = require('ws');
 const { createVpad } = require('./vpad');
 const { createStreamer, findBrowser, system: sysProc } = require('./stream-browser');
+const { createAudioCapture, createAudioRelay } = require('./audio-capture');
 const { createLog, installCrashGuard } = require('./crash-log');
 const { execFile } = require('child_process');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 
 let cfg = { port: 3000 };
 try {
@@ -49,6 +52,28 @@ function groupSwitch(files) {
     const updates = info.filter(x => x.kind === 'update' && mine(b, x)).sort((p, q) => q.version - p.version).map(x => ({ file: x.file, version: x.version }));
     return { file: b.file, full: b.full, updates, dlc: info.filter(x => x.kind === 'dlc' && mine(b, x)).length };
   });
+}
+
+// cloudflared, the tunnel's program: the official Windows release, downloaded only when it is neither on the PATH nor in cache/bin.
+const TUNNEL_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
+const TUNNEL_EXE = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+// Streams url into file; the signal cancels it.
+async function downloadFile(url, file, signal) {
+  const res = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(180000)]) });
+  if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(file));
+}
+// Only a Windows program that runs goes into cache/bin: a cut-short download or an error page does not.
+async function checkTunnelProgram(file) {
+  const { size } = await fs.promises.stat(file);
+  const head = Buffer.alloc(2), handle = await fs.promises.open(file, 'r');
+  try { await handle.read(head, 0, 2, 0); } finally { await handle.close(); }
+  if (head.toString() !== 'MZ' || size < 5e6 || size > 200e6) throw new Error('el archivo bajado no es cloudflared');
+  const ran = await new Promise(resolve => {
+    try { execFile(file, ['--version'], { timeout: 20000, windowsHide: true }, err => resolve(!err)); }
+    catch (e) { resolve(false); }   // a file Windows cannot run at all throws right here
+  });
+  if (!ran) throw new Error('cloudflared no arranca en esta PC (¿lo bloquea un antivirus?)');
 }
 
 const defaultLog = createLog(path.join(__dirname, 'cache', 'remotegame.log'));
@@ -953,13 +978,18 @@ const spawnEmulator = options.spawnEmulator || require('child_process').spawn;
 const killProcess = options.killProcess || sysProc.kill;
 const EMU_LOG = path.resolve(options.emulatorLogFile || (testing ? path.join(os.tmpdir(), 'remotegame-test-emulator.log') : path.join(__dirname, 'cache', 'emulator-output.log')));
 const EARLY_EXIT = options.earlyExit ?? 5000;   // an exit with an error before this many ms is a failed start (state.failed tells the page why)
+// The emulator's own audio (WASAPI process capture, audio-capture.js), relayed to the stream page over /ws-audio. Under `node --test` it stays
+// off (real PowerShell) unless a test passes options.audio ({} = real helper, or { spawn } = a fake); without it the stream carries the system audio.
+const audio = options.audio === false || (testing && !options.audio) ? null : createAudioCapture({ log: text => log.write('audio', text.replace(/^audio: /, '')), ...options.audio });
+const audioRelay = createAudioRelay(audio);
 // Under `node --test` the stream window (real browser, PowerShell) stays off unless a test passes options.stream (fakes).
 const streamer = options.stream === false || (testing && !options.stream) ? null : createStreamer({
   browser: options.browser === undefined ? findBrowser() : options.browser,
   profile: path.resolve(options.streamProfile || path.join(__dirname, 'cache', 'stream-browser')),
   port: () => server.address()?.port || PORT,
   isConnected: () => !!party.host && party.game?.mode === 'stream',
-  log: text => log.write('stream', text),
+  log: text => log.write('stream', text.replace(/^stream: /, '')),   // its lines already say "stream: "
+  processAudio: () => audio ? audio.settled(4000).then(r => r.ok) : Promise.resolve(false),   // the window skips the system-audio switch when this is true
   headless: options.streamHeadless ?? readSettings().streamHeadless !== false,   // settings.json -> "streamHeadless": false brings the (off screen) window back
   ...options.stream
 });
@@ -968,6 +998,7 @@ function endSession(entry) {
   if (entry.ended) return;
   entry.ended = entry.done = true;
   if (streamer) streamer.stop().catch(e => log.error('stream', e));
+  if (audio) audio.stop();
   vpadDo(v => v.releaseAll());
 }
 // The first line of the emulator's output that says what went wrong (MAME: "spc700.rom NOT FOUND (...)").
@@ -1026,6 +1057,7 @@ app.post('/api/launch', ownerOnly('launch'), async (req, res) => {
     } catch (e) { failure = e; log.error('launch', e); }
     finally { if (outFd !== null) try { fs.closeSync(outFd); } catch (e) { /* closed */ } }
     if (failure) { endSession(entry); if (running === entry) running = null; return res.status(500).json({ ok: false, msg: 'No pude abrir ' + emu.name + ': ' + (failure.code === 'ENOENT' ? 'el programa no existe.' : failure.message) }); }
+    if (audio && !entry.ended) audio.start(entry.pid);
     if (streamer && !entry.ended) streamer.start({ pid: entry.pid, name: entry.name, system: entry.system }).catch(e => log.error('stream', e));
     if (entry.failure) return res.status(500).json({ ok: false, msg: entry.failure.msg });
     res.json({ ok: true, emulator: emu.name, name: it.name });
@@ -1050,6 +1082,7 @@ app.post('/api/launch/stop', ownerOnly('launch'), async (req, res) => {
 app.post('/api/launch/stream', ownerOnly('launch'), (req, res) => {
   const e = running;
   if (!e || e.done || !streamer) return res.status(409).json({ ok: false, msg: 'No hay un juego abierto desde RemoteGame.' });
+  if (audio) audio.start(e.pid);   // already running: nothing; it had failed: one more try
   streamer.start({ pid: e.pid, name: e.name, system: e.system }).catch(err => log.error('stream', err));
   res.json({ ok: true });
 });
@@ -1149,7 +1182,7 @@ const upload = multer({
   }
 });
 // With a tunnel up anyone holding the link reaches this server: only this PC may write.
-// Tunnels (ngrok) connect from localhost too, but always add X-Forwarded-For.
+// The tunnel connects from localhost too, but always adds X-Forwarded-For.
 function fromThisPc(req) {
   return /^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || '') && !req.headers['x-forwarded-for'];
 }
@@ -1190,6 +1223,18 @@ function lanAddresses() {
 }
 // What the virtual pads are doing (DSU port and clients, keyboard helper, seats). Only this PC.
 app.get('/api/vpad', (req, res) => fromThisPc(req) ? res.json(game.vpad.status()) : res.status(403).json({ ok: false, msg: 'no permitido' }));
+// Diagnosis lines from the host page (a guest's video froze, the encoder is limited...): one line each, into cache/remotegame.log.
+// The last 200 stay in memory for GET /api/diag. Only this PC, with the page's own header.
+const diagLines = [];
+app.post('/api/diag', ownerOnly('diag'), (req, res) => {
+  const line = String((req.body || {}).line ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (!line) return res.status(400).json({ ok: false, msg: 'Falta la línea.' });
+  log.write('diag', line);
+  diagLines.push({ at: Date.now(), line });
+  if (diagLines.length > 200) diagLines.shift();
+  res.json({ ok: true });
+});
+app.get('/api/diag', ownerOnly('diag'), (req, res) => res.json({ ok: true, lines: diagLines }));
 app.get('/api/info', (req, res) => {
   const port = server.address()?.port || PORT;
   res.json({ port, gamesRoot: fromThisPc(req) ? GAMES_ROOT : undefined, version: '0.5.0', build: BUILD, lanUrls: lanUrls(), publicUrl: game.publicUrl || null });
@@ -1233,6 +1278,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMess
 server.on('upgrade', (req, socket, head) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
   if (pathname === '/ws') wss.handleUpgrade(req, socket, head, ws => { ws.local = fromThisPc(req); wss.emit('connection', ws); });
+  else if (pathname === '/ws-audio') { if (fromThisPc(req)) audioRelay.handle(req, socket, head); else { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); } }   // the emulator's audio: this PC only
   else if (!pathname.startsWith('/socket.io/')) socket.destroy();
 });
 const rooms = new Map();
@@ -1274,6 +1320,7 @@ wss.on('connection', ws => {
         // A native emulator on this PC, captured as video: no ROM; the guests' pads go to the virtual pads (vpad).
         const name = typeof m.name === 'string' ? m.name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
         info = { mode: 'stream', core: 'native', analog: true, name: name || 'Juego de la PC' };
+        if (Array.isArray(m.caps) && m.caps.includes('ack')) info.ack = true;
       } else {
         const system = String(m.system || '');
         const sys = getSys(system);
@@ -1281,6 +1328,7 @@ wss.on('connection', ws => {
         const core = String(m.core || '');
         if (!sys || !rom || !/^[a-z0-9]{1,20}$/.test(core) || !sys.exts.includes(path.extname(rom).toLowerCase()) || !fs.existsSync(path.join(sys.dir, rom))) return send(ws, { t: 'error', msg: 'Juego inválido o inexistente' });
         info = { system, rom, core, name: gameInfo(sys, rom).name };
+        if (Array.isArray(m.caps) && m.caps.includes('ack')) info.ack = true;
       }
       // Opening another game (or reloading) replaces the previous host page.
       if (party.host && party.host !== ws) { party.host.partyRole = null; send(party.host, { t: 'replaced' }); }
@@ -1316,10 +1364,13 @@ wss.on('connection', ws => {
       if (old && old !== ws) { old.partyRole = null; send(old, { t: 'replaced' }); vpadDo(v => v.release(slot)); }
       party.guests[slot] = ws; party.held[slot] = null;
       ws.partyRole = 'guest'; ws.guestId = id; ws.slot = slot;
+      ws.label = cleanText(m.label, 40); ws.padName = ws.padName || '';
       send(ws, { t: 'game', game: party.host ? party.game : null, player: slot + 2 });
       send(party.host, { t: 'peer', slot });
       return;
     }
+    // A guest says which pad its browser sees (shown to the host as "who is who"); nothing else.
+    if (m.t === 'info' && ws.partyRole === 'guest') { ws.padName = cleanText(m.pad, 40); return; }
     // Signals are routed by seat and the sender is filled in here, never taken from the message:
     // a guest only talks to the host and cannot pose as another seat.
     if (ws.partyRole && m.t === 'signal' && m.data) {
@@ -1393,6 +1444,7 @@ wss.on('connection', ws => {
 // The party: one permanent link, up to 3 guests (P2-P4, seats 0-2), whatever game the host opens.
 const party = { host: null, guests: [null, null, null], held: [null, null, null], game: null };
 const guestSlots = () => party.guests.flatMap((g, slot) => g ? [slot] : []);
+const cleanText = (v, max) => typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '';
 // The virtual pads (game.vpad, from vpad.js or options.vpad) may be missing or fail: the party goes on.
 const vpadDo = fn => { try { if (game.vpad) fn(game.vpad); } catch (e) { console.log('vpad: ' + e.message); } };
 function leaveParty(ws) {
@@ -1410,7 +1462,7 @@ function leaveParty(ws) {
 }
 app.get('/api/party', (req, res) => {
   const slots = guestSlots();
-  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: slots.length > 0, guests: slots.length, slots, players: slots.map(s => s + 2), hosting: !!party.host, game: party.host ? party.game : null, tunnel: tunnel.state() });
+  res.json({ publicUrl: game.publicUrl || null, lanUrls: lanUrls(), guest: slots.length > 0, guests: slots.length, slots, players: slots.map(s => s + 2), who: slots.map(s => ({ player: s + 2, label: party.guests[s].label || '', pad: party.guests[s].padName || '' })), hosting: !!party.host, game: party.host ? party.game : null, tunnel: tunnel.state() });
 });
 // The switch of the banner. Only this PC: a guest's page gets 403. The choice is kept in settings.json
 // (share) and read at startup, so it survives restarts.
@@ -1422,61 +1474,91 @@ app.post('/api/tunnel', ownerOnly('tunnel'), (req, res) => {
   catch (e) { return res.status(500).json({ ok: false, msg: 'No pude guardar los ajustes.' }); }
   res.json({ ok: true, tunnel: on ? tunnel.start() : tunnel.stop() });
 });
-// The ngrok tunnel: guests outside the home network reach this server through it. Only pages and
-// signaling go through it; video and controls travel over WebRTC. One ngrok at a time (free plan: one session).
-const tun = { state: 'off', error: null, proc: null };
+// The tunnel (Cloudflare Quick Tunnel, cloudflared): guests outside the home network reach this server through it.
+// Only pages and signaling go through it; video and controls travel over WebRTC. One tunnel at a time. No account and
+// no warning page; the link is random and changes on every start.
+const tun = { state: 'off', error: null, msg: null, proc: null, run: null };
+const TUNNEL_BIN = path.resolve(options.tunnelBinDir || path.join(__dirname, 'cache', 'bin'));
 const spawnTunnel = options.spawnTunnel || require('child_process').spawn;
+const downloadTunnel = options.downloadTunnel || downloadFile;
 let hooked = false;
+// The program to run: cloudflared on the PATH, else the copy in cache/bin, else a one-time download.
+// Resolves to null when the start was stopped meanwhile.
+async function tunnelProgram(run) {
+  const onPath = (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, TUNNEL_EXE)).find(f => fs.existsSync(f));
+  if (onPath) return onPath;
+  const cached = path.join(TUNNEL_BIN, TUNNEL_EXE), part = cached + '.part';
+  if (fs.existsSync(cached)) return cached;
+  tun.msg = 'Preparando el túnel (primera vez)…';
+  fs.mkdirSync(TUNNEL_BIN, { recursive: true });
+  try { await downloadTunnel(TUNNEL_URL, part, run.abort.signal); }
+  catch (e) {
+    fs.rmSync(part, { force: true });
+    if (run.abort.signal.aborted) return null;
+    throw new Error('no pude bajar cloudflared; revisá la conexión a Internet');
+  }
+  try { await checkTunnelProgram(part); fs.renameSync(part, cached); }
+  catch (e) { fs.rmSync(part, { force: true }); throw e; }
+  return cached;
+}
+// The tunnel is down for a reason: no link, and it can be started again.
+function fail(message) {
+  Object.assign(tun, { state: 'error', error: message, msg: null, proc: null, run: null });
+  game.publicUrl = null;
+}
+function spawnTunnelProcess(exe) {
+  const child = spawnTunnel(exe, ['tunnel', '--url', 'http://localhost:' + (server.address()?.port || PORT), '--no-autoupdate'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true });
+  tun.proc = child;
+  const onLine = line => {
+    if (child !== tun.proc) return;
+    const link = line.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (link && tun.state === 'starting') {
+      Object.assign(tun, { state: 'on', error: null, msg: null });
+      game.publicUrl = link[0];
+      console.log('\n  Link para tu amigo:  ' + link[0] + '\n  (cambia cada vez que se prende el túnel)\n');
+    } else if (tun.state === 'starting' && /\sERR\s/.test(line)) {
+      // e.g. `... ERR Couldn't start tunnel error="unknown protocol ..."`: keep the reason, not the timestamp.
+      const text = line.replace(/^.*?\sERR\s+/, '');
+      log.write('tunnel', text);
+      tun.error = ((text.match(/error="([^"]*)"/) || [])[1] || text).slice(0, 200);
+    }
+  };
+  // cloudflared logs to stderr; stdout is read too so that no pipe is left to fill up.
+  for (const stream of [child.stdout, child.stderr]) {
+    let buffer = '';
+    stream.setEncoding('utf8');
+    stream.on('data', chunk => { buffer += chunk; const lines = buffer.split(/\r?\n/); buffer = lines.pop(); lines.forEach(onLine); });
+  }
+  // Not started (not installed, blocked) is reported like a dead one. Clearing tun.proc turns a later exit into a no-op.
+  child.on('error', err => { if (child === tun.proc) fail('no pude arrancar cloudflared: ' + err.message); });
+  child.on('exit', (code, signal) => { if (child === tun.proc) fail(tun.error || 'cloudflared se cerró (código ' + (code ?? signal) + ')'); });
+  if (!hooked) {
+    hooked = true;
+    // Ctrl+C, closing the console (SIGHUP) or quitting must not leave cloudflared running.
+    process.on('exit', () => tunnel.stop());
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { tunnel.stop(); process.exit(0); });
+  }
+}
 const tunnel = {
-  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error }),
+  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error, msg: tun.msg, provider: 'cloudflared' }),
   // Only a saved "off" keeps it down: a new install starts with the tunnel on.
   wanted: () => readSettings().share !== false,
   start() {
-    if (tun.proc) return tunnel.state();
-    const child = spawnTunnel('ngrok', ['http', String(server.address()?.port || PORT), '--log', 'stdout', '--log-format', 'json'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-    Object.assign(tun, { state: 'starting', error: null, proc: child });
+    if (tun.run) return tunnel.state();   // one tunnel at a time: already starting or up
+    const run = { abort: new AbortController() };
+    Object.assign(tun, { run, state: 'starting', error: null, msg: null, proc: null });
     game.publicUrl = null;
-    // Errors count only while starting: a tunnel that is up keeps running through ngrok's own reconnects.
-    const note = text => {
-      console.log('ngrok: ' + text);
-      if (tun.state === 'starting') tun.error = /authtoken|authentication failed|ERR_NGROK_4018/i.test(text) ? 'Falta configurar el authtoken de ngrok' : text.split('\n')[0].slice(0, 200);
-    };
-    const onLine = line => {
-      let entry; try { entry = JSON.parse(line); } catch { return; }
-      if (child !== tun.proc) return;
-      if (entry.url && /^https:/.test(entry.url) && tun.state === 'starting') {
-        tun.state = 'on';
-        game.publicUrl = entry.url;
-        console.log('\n  Link para tu amigo:  ' + entry.url + '\n  (es siempre el mismo; pasáselo una sola vez)\n');
-      } else if (entry.lvl === 'eror' || (entry.err && entry.err !== '<nil>')) note(String(entry.err && entry.err !== '<nil>' ? entry.err : entry.msg));
-    };
-    let buffer = '';
-    child.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split('\n'); buffer = lines.pop(); lines.forEach(onLine); });
-    child.stderr.on('data', chunk => { if (child === tun.proc) note(String(chunk).trim()); });
-    // ENOENT: ngrok is not on the PATH. Clearing tun.proc turns the exit that may follow into a no-op.
-    child.on('error', err => {
-      if (child !== tun.proc) return;
-      Object.assign(tun, { state: 'error', error: err.code === 'ENOENT' ? 'ngrok no está instalado (winget install ngrok.ngrok)' : err.message, proc: null });
-      game.publicUrl = null;
-    });
-    child.on('exit', code => {
-      if (child !== tun.proc) return;   // stopped on purpose, or already reported
-      Object.assign(tun, { state: 'error', error: tun.error || 'ngrok se cerró (código ' + code + ')', proc: null });
-      game.publicUrl = null;
-    });
-    if (!hooked) {
-      hooked = true;
-      // Ctrl+C, closing the console (SIGHUP) or quitting must not leave ngrok running.
-      process.on('exit', () => tunnel.stop());
-      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { tunnel.stop(); process.exit(0); });
-    }
+    tunnelProgram(run).then(exe => {
+      if (exe && tun.run === run) { tun.msg = null; spawnTunnelProcess(exe); }
+    }).catch(err => { if (tun.run === run) fail(err.message); });
     return tunnel.state();
   },
   stop() {
-    const child = tun.proc;
-    Object.assign(tun, { state: 'off', error: null, proc: null });
+    const { run, proc } = tun;
+    Object.assign(tun, { state: 'off', error: null, msg: null, proc: null, run: null });
     game.publicUrl = null;
-    if (child) try { child.kill(); } catch {}
+    if (run) run.abort.abort();   // a download still running is cancelled
+    if (proc) try { proc.kill(); } catch {}
     return tunnel.state();
   }
 };
@@ -1488,6 +1570,8 @@ async function close() {
   if (server.listening) await new Promise(resolve => server.close(resolve));
   lrAbort.abort();
   if (streamer) await streamer.close();
+  audioRelay.close();
+  if (audio) audio.close();
   await game.vpad.close?.();
   await Promise.all([...lrBusy.values()]);
   try { if (lbDb) lbDb.close(); } catch (e) {}
@@ -1518,7 +1602,7 @@ if (require.main === module) {
   const open = process.argv.includes('--open');
   if (open) process.title = 'RemoteGame';
   const show = () => { if (open) openBrowser('http://localhost:' + port); setTimeout(() => process.exit(0), 3000); };
-  let replaced = false, deadline = 0;
+  let deadline = 0;
   const listen = () => game.server.listen(port);
   // The stream window is ours: it never outlives RemoteGame (Ctrl+C, closing the console, quitting).
   process.on('exit', () => game.killStream());
@@ -1541,7 +1625,7 @@ if (require.main === module) {
       console.log('Hay una versión vieja de RemoteGame abierta: cerrá su ventana y volvé a abrir el acceso directo.');
       return show();
     }
-    replaced = true; deadline = Date.now() + 10000;
+    deadline = Date.now() + 10000;
     setTimeout(listen, 300);
   });
   game.server.once('listening', () => {
@@ -1549,8 +1633,8 @@ if (require.main === module) {
     defaultLog.write('server', 'arrancó en el puerto ' + port + ' (pid ' + process.pid + ', node ' + process.version + ')');
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
     // --no-share and SHARE=0 start it off for this run only; otherwise the saved switch (settings.json) decides.
-    // After a replacement, give ngrok a moment to notice the old tunnel is gone (the free plan allows one).
-    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0' && game.tunnel.wanted()) setTimeout(() => game.tunnel.start(), replaced ? 2500 : 0);
+    // A replaced instance takes its cloudflared down with it: its exit handler stops the tunnel.
+    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0' && game.tunnel.wanted()) game.tunnel.start();
     if (open) openBrowser('http://localhost:' + port);
     if (open) console.log('Cerrá esta ventana para apagar RemoteGame.');
   });

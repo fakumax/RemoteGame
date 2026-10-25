@@ -30,6 +30,9 @@
 #pick:hover{filter:brightness(1.1)}
 #capinfo,#noaudio{font-size:13px;line-height:1.5}#capinfo:empty{display:none}
 #padwarn{font-size:13px;line-height:1.5;color:var(--warn);white-space:pre-line}#padwarn:empty{display:none}
+#ctlbox{display:flex;flex-direction:column;gap:6px}#ctlbox[hidden]{display:none}
+#ctlbox h2{margin:0;font-size:12px;font-weight:600;color:var(--mut)}
+#eden{font-size:13px;line-height:1.5}#eden:empty{display:none}#eden.warn{color:var(--warn)}#eden.ok{color:var(--ok)}
 #helpbox summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
 #help p{margin:0 0 6px}
 @media (min-width:900px){
@@ -41,6 +44,8 @@
 }
 </style>
 <script src="/webrtc.js"></script>
+<script src="/process-audio.js"></script>
+<script src="/diag.js"></script>
 <script src="/host.js"></script>
 <script src="/pads.js"></script>
 <script src="/share.js"></script>
@@ -64,6 +69,7 @@
       <div id="noaudio" class="warn" hidden>🔇 Para que tus amigos escuchen, compartí la pantalla completa y marcá "Compartir audio del sistema".</div>
     </div>
     <div id="padwarn" role="alert"></div>
+    <div class="panel" id="ctlbox" hidden><h2>Probar controles: lo que aprietan tus amigos</h2><div id="lights"></div><div id="eden"></div></div>
     <details id="helpbox"><summary>Ayuda</summary><div class="kbd" id="help">
       <p><b>P1 sos vos:</b> jugás con tu mando directo en el emulador, sin pasar por RemoteGame. Tus amigos son P2, P3 y P4: sus botones llegan a esta PC como mandos virtuales.</p>
       <p><b>Switch (Eden):</b> poné P2–P4 como "mando UDP", pads 1–3.</p>
@@ -76,7 +82,7 @@
 (function(){
   const $=id=>document.getElementById(id);
   const DEFAULT='Juego de la PC', NAME_KEY='remotegame-stream-name', MBPS=15;   // 15 Mbps per guest, 1080p60
-  let host=null, starting=null, stream=null, video=null, audio=null;
+  let host=null, starting=null, stream=null, video=null, audio=null, proc=null;   // proc: the emulator's own audio (process-audio.js)
   const store={get(k){try{return localStorage.getItem(k);}catch(e){return null;}},set(k,v){try{localStorage.setItem(k,v);}catch(e){}}};
   const preview=$('preview'), gname=$('gname');
   gname.value=store.get(NAME_KEY)||'';
@@ -119,10 +125,20 @@
   }
 
   const gdm=o=>navigator.mediaDevices.getDisplayMedia(o);
+  // Opened by RemoteGame, the audio is the emulator's alone (WASAPI process capture on the server, no Discord or anything else);
+  // anything else, or if that is not available, falls back to the system audio of the screen capture.
+  async function emulatorAudio(){
+    if(!auto||!window.ProcessAudio)return null;
+    if(proc&&!proc.stats().ended)return proc;
+    proc=await ProcessAudio.open();
+    if(!proc)console.log('audio por proceso no disponible: '+ProcessAudio.reason);
+    return proc;
+  }
   // Chrome 105+ knows systemAudio, 107+ selfBrowserSurface and surfaceSwitching; a browser that does not
   // ignores them (unknown keys in the options are dropped). If it rejects the set anyway, ask for the basics.
-  async function capture(){
-    const frames={frameRate:{ideal:60}};
+  async function capture(own){
+    const frames={frameRate:{ideal:60},width:{ideal:3840},height:{ideal:2160}};
+    if(own)return gdm({video:frames,audio:false,selfBrowserSurface:'exclude',surfaceSwitching:'include'});
     try {
       return await gdm({video:frames,audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},systemAudio:'include',selfBrowserSurface:'exclude',surfaceSwitching:'include'});
     } catch(e){
@@ -146,14 +162,16 @@
     picking=true;
     try {
       let next;
-      try { next=await capture(); }
+      const own=await emulatorAudio();
+      try { next=await capture(own); }
       catch(e){
         failure=e&&e.name||'error';
         say(e&&e.name==='NotAllowedError'?(auto?'Esta ventana no puede capturar sola. Tocá el botón para elegir qué transmitir.':'No elegiste nada. Tocá el botón para intentar de nuevo.'):'No se pudo capturar: '+(e&&e.message||e));
         return false;
       }
       stopCapture();
-      stream=next;video=next.getVideoTracks()[0];audio=next.getAudioTracks()[0]||null;
+      stream=next;video=next.getVideoTracks()[0];audio=own?own.track:next.getAudioTracks()[0]||null;
+      if(own)for(const t of next.getAudioTracks()){next.removeTrack(t);t.stop();}
       video.contentHint='motion';
       preview.srcObject=next;$('idle').hidden=true;
       $('noaudio').hidden=!!audio;
@@ -175,6 +193,8 @@
     } finally { picking=false; }
   }
   $('pick').onclick=pick;
+  // For the checks in a headless browser: the room's calls and the emulator audio, read-only.
+  window.__stream={host:()=>host,audio:()=>proc};
   // Automatic mode: no button. The emulator may not have its window yet, so it tries a few times; if it never gets one, it leaves
   // the room (RemoteGame then offers "Volver a transmitir") instead of hanging on.
   async function autoStart(tries){
@@ -201,6 +221,32 @@
     } catch(e){ $('padwarn').textContent=''; }
   }
   warnings();setInterval(warnings,3000);
+})();
+</script>
+<script>
+// Test of the controls: what each guest presses lights up here as it arrives (host.js tells the page), and whether Eden reads the UDP pads.
+(function(){
+  const lights=RemoteHUD.padLights(document.getElementById('lights')), box=document.getElementById('ctlbox'), eden=document.getElementById('eden');
+  let seats=[];
+  document.addEventListener('rg-pad',e=>lights.set(e.detail.seat+2,e.detail.state));
+  document.addEventListener('rg-release',e=>lights.drop(e.detail.seat+2));
+  document.addEventListener('rg-seats',e=>{
+    seats=e.detail.seats;
+    for(const p of lights.players())if(!seats.includes(p-2))lights.drop(p);
+    for(const s of seats)if(!lights.players().includes(s+2))lights.set(s+2,RemotePads.EMPTY);
+    box.hidden=!seats.length;check();
+  });
+  async function check(){
+    if(!seats.length){eden.textContent='';return;}
+    try {
+      const vpad=await fetch('/api/vpad').then(r=>r.json());
+      const st=await fetch('/api/launch/state',{headers:{'X-RemoteGame':'launch'}}).then(r=>r.json()).catch(()=>({}));
+      // A game opened by RemoteGame that is not on Switch (MAME) uses the keyboard, not Eden.
+      const text=st.system&&st.system!=='switch'?'':RemotePads.edenLine(vpad.dsu,seats);
+      eden.textContent=text;eden.className=text.startsWith('⚠')?'warn':text?'ok':'';
+    } catch(e){}
+  }
+  setInterval(check,1500);
 })();
 </script>
 </body>

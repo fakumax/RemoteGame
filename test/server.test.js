@@ -82,7 +82,7 @@ after(async () => {
   await game.close();
   fs.rmSync(temp,{recursive:true,force:true});
 });
-// remote: simulates a visitor arriving through the tunnel (ngrok adds X-Forwarded-For).
+// remote: simulates a visitor arriving through the tunnel (the tunnel adds X-Forwarded-For).
 async function wsClient(remote) {
   const ws=new WebSocket(base.replace('http','ws')+'/ws',remote?{headers:{'X-Forwarded-For':'203.0.113.9'}}:undefined); clients.push(ws);
   ws.queue=[];ws.on('message',data=>ws.queue.push(JSON.parse(data)));
@@ -646,67 +646,157 @@ test('Search: Spanish spelling finds the English title; no result says so',async
   for(const q of ['internacionales','mundial'])assert.equal((await get('/api/games?system=all&q='+q)).total,0,q);
   assert.equal((await get('/api/games?system=snes&q=zzzz')).total,0);
 });
-// The tunnel runs ngrok: these tests inject a fake process that writes ngrok's JSON lines, so the real ngrok never starts.
+// The tunnel runs cloudflared. These tests inject a fake process that writes the lines the real one writes (captured
+// from cloudflared 2026.10.3; the link name is made up), so the real program never starts. Downloads are injected too,
+// and the PATH is emptied, so a cloudflared installed on this PC is never picked up.
 const { PassThrough } = require('node:stream');
 const { EventEmitter } = require('node:events');
-const fakeNgrok = () => { const c = new EventEmitter(); c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => { c.killed = true; setImmediate(() => c.emit('exit', null)); return true; }; return c; };
-const ngrokLine = entry => JSON.stringify(entry) + '\n';
-const waitFor = async cond => { for (let i = 0; i < 300 && !cond(); i++) await new Promise(r => setTimeout(r, 10)); assert.ok(cond(), 'no llegó a tiempo'); };
-test('Tunnel: starting, then on with the https link; one ngrok at a time; stop turns it off and drops the link',async()=>{
-  const spawned=[];const spawnTunnel=(cmd,args)=>{const c=fakeNgrok();c.cmd=cmd;c.args=args;spawned.push(c);return c;};
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-tunnel-'));
-  const {g,url}=await instance({ spawnTunnel,settingsFile:path.join(root,'settings.json') });
+const fakeCloudflared = () => { const c = new EventEmitter(); c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => { c.killed = true; setImmediate(() => c.emit('exit', null)); return true; }; return c; };
+const cfLine = text => '2026-10-25T01:28:22Z ' + text + '\n';
+const cfLink = name => cfLine('INF |  https://' + name + '.trycloudflare.com  |');
+const waitFor = async (cond, tries = 300) => { for (let i = 0; i < tries && !cond(); i++) await new Promise(r => setTimeout(r, 10)); assert.ok(cond(), 'no llegó a tiempo'); };
+const TUNNEL_DOWNLOAD = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
+const OFF = { state: 'off', url: null, error: null, msg: null, provider: 'cloudflared' };
+const tunnelRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'remotegame-tunnel-'));
+const cachedTunnel = root => { fs.mkdirSync(path.join(root, 'bin'), { recursive: true }); fs.writeFileSync(path.join(root, 'bin', 'cloudflared.exe'), 'cached'); };
+const tunnelTest = (name, fn) => test(name, async () => { const saved = process.env.PATH; process.env.PATH = path.join(temp, 'no-path'); try { await fn(); } finally { process.env.PATH = saved; } });
+tunnelTest('Tunnel: starts cloudflared; the link is the one on its stderr; stop kills it',async()=>{
+  const root=tunnelRoot();cachedTunnel(root);
+  const spawned=[];const spawnTunnel=(cmd,args)=>{const c=fakeCloudflared();c.cmd=cmd;c.args=args;spawned.push(c);return c;};
+  const {g,url}=await instance({ spawnTunnel,settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
   try{
-    assert.deepEqual(g.tunnel.state(),{state:'off',url:null,error:null});
+    assert.deepEqual(g.tunnel.state(),OFF);
     assert.equal(g.tunnel.wanted(),true);   // no settings.json yet: the tunnel starts on
     assert.equal(g.tunnel.start().state,'starting');
-    assert.equal(g.tunnel.start().state,'starting');   // a second start does not spawn another ngrok
-    assert.equal(spawned.length,1);
-    assert.equal(spawned[0].cmd,'ngrok');
-    assert.deepEqual(spawned[0].args,['http',String(g.server.address().port),'--log','stdout','--log-format','json']);
-    spawned[0].stdout.write(ngrokLine({lvl:'info',msg:'started tunnel',url:'https://demo.ngrok-free.app'}));
+    assert.equal(g.tunnel.start().state,'starting');   // a second start does not spawn another cloudflared
+    await waitFor(()=>spawned.length===1);
+    assert.equal(spawned[0].cmd,path.join(root,'bin','cloudflared.exe'));
+    assert.deepEqual(spawned[0].args,['tunnel','--url','http://localhost:'+g.server.address().port,'--no-autoupdate']);
+    spawned[0].stderr.write(cfLine('INF Requesting new quick Tunnel on trycloudflare.com...'));   // not a link
+    spawned[0].stderr.write(cfLink('demo-words-here'));
     await waitFor(()=>g.tunnel.state().state==='on');
-    assert.deepEqual(g.tunnel.state(),{state:'on',url:'https://demo.ngrok-free.app',error:null});
+    assert.deepEqual(g.tunnel.state(),{state:'on',url:'https://demo-words-here.trycloudflare.com',error:null,msg:null,provider:'cloudflared'});
     const party=await (await fetch(url+'/api/party')).json();
-    assert.equal(party.publicUrl,'https://demo.ngrok-free.app');assert.equal(party.tunnel.state,'on');
-    assert.deepEqual(g.tunnel.stop(),{state:'off',url:null,error:null});
+    assert.equal(party.publicUrl,'https://demo-words-here.trycloudflare.com');assert.equal(party.tunnel.state,'on');assert.equal(party.tunnel.provider,'cloudflared');
+    assert.deepEqual(g.tunnel.stop(),OFF);
     assert.equal(spawned[0].killed,true);
     assert.equal((await (await fetch(url+'/api/party')).json()).publicUrl,null);
     assert.equal(g.tunnel.stop().state,'off');   // stopping twice is harmless
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });
-test('Tunnel: a dead ngrok leaves an error and no link; a missing authtoken or ngrok is explained',async()=>{
-  const spawned=[];let mode='ok';
-  const spawnTunnel=()=>{const c=fakeNgrok();spawned.push(c);if(mode==='missing')setImmediate(()=>c.emit('error',Object.assign(new Error('spawn ngrok ENOENT'),{code:'ENOENT'})));return c;};
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-tunnel-'));
-  const {g,url}=await instance({ spawnTunnel,settingsFile:path.join(root,'settings.json') });
+tunnelTest('Tunnel: a cloudflared that dies leaves an error and no link; an ERR line before that gives the reason',async()=>{
+  const root=tunnelRoot();cachedTunnel(root);
+  const spawned=[];let blocked=false;
+  const spawnTunnel=()=>{const c=fakeCloudflared();spawned.push(c);if(blocked)setImmediate(()=>c.emit('error',new Error('spawn blocked')));return c;};
+  const {g,url}=await instance({ spawnTunnel,settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
   try{
     g.tunnel.start();
-    spawned[0].stdout.write(ngrokLine({lvl:'info',url:'https://demo.ngrok-free.app'}));
+    await waitFor(()=>spawned.length===1);
+    spawned[0].stderr.write(cfLink('demo-words-here'));
     await waitFor(()=>g.tunnel.state().state==='on');
-    spawned[0].emit('exit',1);
-    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'ngrok se cerró (código 1)'});
+    spawned[0].emit('exit',1);   // dies while up
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'cloudflared se cerró (código 1)',msg:null,provider:'cloudflared'});
     assert.equal((await (await fetch(url+'/api/party')).json()).publicUrl,null);
-    // Without an authtoken ngrok logs it, then exits.
+    // Dies before the link, with the reason on its ERR line (what a bad --protocol prints).
     g.tunnel.start();
-    spawned[1].stdout.write(ngrokLine({lvl:'crit',msg:'command failed',err:'authentication failed: Usage of ngrok requires a verified account and authtoken.'}));
+    await waitFor(()=>spawned.length===2);
+    spawned[1].stderr.write(cfLine('ERR Couldn\'t start tunnel error="unknown protocol bogus, Available protocols: \'auto\'"'));
     await waitFor(()=>g.tunnel.state().error);
     spawned[1].emit('exit',1);
-    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'Falta configurar el authtoken de ngrok'});
-    // Without ngrok on the PATH the spawn itself fails with ENOENT.
-    mode='missing';
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'unknown protocol bogus, Available protocols: \'auto\'',msg:null,provider:'cloudflared'});
+    // Not started at all (blocked, say): the spawn error is the reason, and it can be started again.
+    blocked=true;
     g.tunnel.start();
-    await waitFor(()=>g.tunnel.state().state==='error');
-    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'ngrok no está instalado (winget install ngrok.ngrok)'});
-    assert.deepEqual(g.tunnel.stop(),{state:'off',url:null,error:null});
+    await waitFor(()=>g.tunnel.state().error==='no pude arrancar cloudflared: spawn blocked');
+    assert.equal(g.tunnel.state().state,'error');
+    assert.deepEqual(g.tunnel.stop(),OFF);
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });
-test('Tunnel switch: only this PC with its header; the choice is saved in settings.json beside the other keys',async()=>{
+tunnelTest('Tunnel: the first start downloads cloudflared once into cache/bin, checks it and reuses it',async()=>{
+  const root=tunnelRoot();const exe=path.join(root,'bin','cloudflared.exe');
+  const downloads=[];const spawned=[];
+  // A real Windows program for the check: a copy of this node.exe, which runs with --version.
+  const downloadTunnel=async(url,file)=>{downloads.push(url);fs.copyFileSync(process.execPath,file);};
+  const spawnTunnel=cmd=>{const c=fakeCloudflared();c.cmd=cmd;spawned.push(c);return c;};
+  const {g,url}=await instance({ spawnTunnel,downloadTunnel,settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
+  try{
+    assert.deepEqual(g.tunnel.start(),{state:'starting',url:null,error:null,msg:'Preparando el túnel (primera vez)…',provider:'cloudflared'});
+    await waitFor(()=>spawned.length===1,2000);
+    assert.deepEqual(downloads,[TUNNEL_DOWNLOAD]);
+    assert.equal(spawned[0].cmd,exe);
+    assert.equal(fs.existsSync(exe+'.part'),false);   // checked, then renamed into place
+    assert.equal(g.tunnel.state().msg,null);
+    spawned[0].stderr.write(cfLink('demo-words-here'));
+    await waitFor(()=>g.tunnel.state().state==='on');
+    g.tunnel.stop();
+    g.tunnel.start();
+    await waitFor(()=>spawned.length===2);
+    assert.equal(spawned[1].cmd,exe);
+    assert.equal(downloads.length,1);   // the second start reuses cache/bin
+    g.tunnel.stop();
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+tunnelTest('Tunnel: a failed download or a file that is not a working cloudflared leaves an error and no program',async()=>{
+  const root=tunnelRoot();const bin=path.join(root,'bin');
+  const spawned=[];let download=null;
+  const {g}=await instance({ spawnTunnel:()=>{const c=fakeCloudflared();spawned.push(c);return c;},downloadTunnel:(url,file)=>download(url,file),settingsFile:path.join(root,'settings.json'),tunnelBinDir:bin });
+  try{
+    download=async()=>{throw new Error('getaddrinfo ENOTFOUND github.com');};
+    g.tunnel.start();
+    await waitFor(()=>g.tunnel.state().state==='error');
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'no pude bajar cloudflared; revisá la conexión a Internet',msg:null,provider:'cloudflared'});
+    assert.equal(fs.existsSync(path.join(bin,'cloudflared.exe.part')),false);
+    // An error page is thrown away, not kept as cloudflared.
+    download=async(url,file)=>fs.writeFileSync(file,'<html>Not Found</html>');
+    g.tunnel.start();
+    await waitFor(()=>g.tunnel.state().error==='el archivo bajado no es cloudflared');
+    assert.equal(fs.existsSync(path.join(bin,'cloudflared.exe.part')),false);
+    assert.equal(fs.existsSync(path.join(bin,'cloudflared.exe')),false);
+    // Big enough and with an MZ header, but not a program that runs.
+    download=async(url,file)=>fs.writeFileSync(file,Buffer.concat([Buffer.from('MZ'),Buffer.alloc(6e6)]));
+    g.tunnel.start();
+    await waitFor(()=>g.tunnel.state().error==='cloudflared no arranca en esta PC (¿lo bloquea un antivirus?)');
+    assert.equal(fs.existsSync(path.join(bin,'cloudflared.exe')),false);
+    assert.equal(spawned.length,0);   // nothing was ever started
+    assert.deepEqual(g.tunnel.stop(),OFF);
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+tunnelTest('Tunnel: stop during the download cancels it: nothing starts and the partial file goes',async()=>{
+  const root=tunnelRoot();const part=path.join(root,'bin','cloudflared.exe.part');
+  const spawned=[];
+  const downloadTunnel=(url,file,signal)=>{fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'partial');return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted'))));};
+  const {g}=await instance({ spawnTunnel:()=>{const c=fakeCloudflared();spawned.push(c);return c;},downloadTunnel,settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
+  try{
+    g.tunnel.start();
+    await waitFor(()=>fs.existsSync(part));
+    assert.deepEqual(g.tunnel.stop(),OFF);
+    await waitFor(()=>!fs.existsSync(part));
+    await new Promise(r=>setTimeout(r,50));
+    assert.equal(spawned.length,0);
+    assert.deepEqual(g.tunnel.state(),OFF);
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('Tunnel: a cloudflared on the PATH is used first, with no download',async()=>{
+  const root=tunnelRoot();const tools=path.join(root,'tools');
+  fs.mkdirSync(tools,{recursive:true});fs.writeFileSync(path.join(tools,'cloudflared.exe'),'on the PATH');
+  const savedPath=process.env.PATH;process.env.PATH=tools+path.delimiter+path.join(temp,'no-path');
+  const spawned=[];
+  const {g}=await instance({ spawnTunnel:cmd=>{const c=fakeCloudflared();c.cmd=cmd;spawned.push(c);return c;},downloadTunnel:()=>{throw new Error('no download expected');},settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
+  try{
+    g.tunnel.start();
+    await waitFor(()=>spawned.length===1);
+    assert.equal(spawned[0].cmd,path.join(tools,'cloudflared.exe'));
+    assert.equal(g.tunnel.state().msg,null);
+    g.tunnel.stop();
+  }finally{process.env.PATH=savedPath;await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+tunnelTest('Tunnel switch: only this PC with its header; the choice is saved in settings.json beside the other keys',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'remotegame-switch-'));
   const settingsFile=path.join(root,'settings.json');
   fs.writeFileSync(settingsFile,JSON.stringify({gamesRoot:root}));
+  cachedTunnel(root);
   const spawned=[];
-  const {g,url}=await instance({ spawnTunnel:()=>{const c=fakeNgrok();spawned.push(c);return c;},settingsFile });
+  const {g,url}=await instance({ spawnTunnel:()=>{const c=fakeCloudflared();spawned.push(c);return c;},settingsFile,tunnelBinDir:path.join(root,'bin') });
   const saved=()=>JSON.parse(fs.readFileSync(settingsFile,'utf8'));
   const call=(method,body,headers={'X-RemoteGame':'tunnel'})=>fetch(url+'/api/tunnel',{method,headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
   try{
@@ -714,18 +804,18 @@ test('Tunnel switch: only this PC with its header; the choice is saved in settin
     for(const [method,body,headers] of [['GET',undefined,{}],['POST',{on:true},{}],['POST',{on:true},{'X-RemoteGame':'settings'}],['POST',{on:true},{'X-RemoteGame':'tunnel','X-Forwarded-For':'203.0.113.9'}],['GET',undefined,{'X-RemoteGame':'tunnel','X-Forwarded-For':'203.0.113.9'}]])
       assert.equal((await call(method,body,headers)).status,403,method+' '+JSON.stringify(headers));
     assert.equal(spawned.length,0);assert.deepEqual(saved(),{gamesRoot:root});
-    // This PC: the owner's GET answers; POST on starts ngrok and saves share: true.
+    // This PC: the owner's GET answers; POST on starts cloudflared and saves share: true.
     assert.equal((await (await call('GET')).json()).tunnel.state,'off');
     let r=await call('POST',{on:true});assert.equal(r.status,200);
     assert.equal((await r.json()).tunnel.state,'starting');
-    assert.equal(spawned.length,1);
-    spawned[0].stdout.write(ngrokLine({lvl:'info',url:'https://demo.ngrok-free.app'}));
+    await waitFor(()=>spawned.length===1);
+    spawned[0].stderr.write(cfLink('demo-words-here'));
     await waitFor(()=>g.tunnel.state().state==='on');
-    assert.equal((await (await call('GET')).json()).tunnel.url,'https://demo.ngrok-free.app');
+    assert.equal((await (await call('GET')).json()).tunnel.url,'https://demo-words-here.trycloudflare.com');
     assert.equal((await (await fetch(url+'/api/party')).json()).tunnel.state,'on');
     assert.deepEqual(saved(),{gamesRoot:root,share:true});
-    // POST off stops ngrok and saves share: false, so the next start keeps it off.
-    r=await call('POST',{on:false});assert.deepEqual(await r.json(),{ok:true,tunnel:{state:'off',url:null,error:null}});
+    // POST off stops cloudflared and saves share: false, so the next start keeps it off.
+    r=await call('POST',{on:false});assert.deepEqual(await r.json(),{ok:true,tunnel:OFF});
     assert.equal(spawned[0].killed,true);
     assert.deepEqual(saved(),{gamesRoot:root,share:false});
     assert.equal(g.tunnel.wanted(),false);
@@ -1268,4 +1358,41 @@ test('Launch + stream: the stream browser is headless by default; settings.json 
       } finally { await g.close(); }
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Diag: the host page writes diagnosis lines to the log; only this PC, tidy and short',async()=>{
+  const lines=[];
+  const {g,url}=await instance({gamesRoot:temp,settingsFile:path.join(temp,'diag-settings.json'),log:{write:(kind,text)=>lines.push(kind+': '+text),error(){}}});
+  try {
+    const post=(body,headers)=>fetch(url+'/api/diag',{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});
+    const ok=await post({line:'freeze P2\u0007 320ms\n · lost 14 '+'x'.repeat(400)},{'X-RemoteGame':'diag'});
+    assert.equal(ok.status,200);
+    assert.equal(lines.length,1);assert.match(lines[0],/^diag: freeze P2 320ms · lost 14 x+$/);assert.ok(lines[0].length<=320);
+    assert.equal((await post({line:'   '},{'X-RemoteGame':'diag'})).status,400);
+    assert.equal((await post({line:'x'})).status,403,'without the page header');
+    assert.equal((await post({line:'x'},{'X-RemoteGame':'diag','X-Forwarded-For':'203.0.113.9'})).status,403,'from the tunnel');
+    const back=await (await fetch(url+'/api/diag',{headers:{'X-RemoteGame':'diag'}})).json();
+    assert.equal(back.lines.length,1);
+    assert.equal((await fetch(url+'/api/diag')).status,403);
+  } finally { await g.close(); }
+});
+test('Party: who is who (device and pad of each guest) and the host says it confirms what it receives',async()=>{
+  const {g,url,connect}=await streamParty();
+  try {
+    const host=await connect();send(host,{t:'host',mode:'stream',name:'Eden',caps:['ack']});
+    assert.equal((await message(host,'hosting')).name,'Eden');
+    assert.equal(g.party.game.ack,true);
+    const a=await connect(true),b=await connect(true);
+    send(a,{t:'guest',id:'who-a',label:'PC · Chrome'});send(b,{t:'guest',id:'who-b',label:'Celu\u0007 · '+'x'.repeat(100)});
+    assert.equal((await message(a,'game')).game.ack,true,'the guest learns the host confirms');
+    await message(b,'game');
+    send(a,{t:'info',pad:'mando de Xbox'});send(b,{t:'info',pad:{evil:1}});
+    await new Promise(r=>setTimeout(r,60));
+    const party=await (await fetch(url+'/api/party')).json();
+    assert.deepEqual(party.who[0],{player:2,label:'PC · Chrome',pad:'mando de Xbox'});
+    assert.equal(party.who[1].player,3);assert.match(party.who[1].label,/^Celu · x+$/);assert.ok(party.who[1].label.length<=40);assert.equal(party.who[1].pad,'');
+    // Someone who is not a guest cannot set it.
+    send(host,{t:'info',pad:'falso'});await new Promise(r=>setTimeout(r,40));
+    assert.equal((await (await fetch(url+'/api/party')).json()).who[0].pad,'mando de Xbox');
+  } finally { await g.close(); }
 });

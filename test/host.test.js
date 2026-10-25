@@ -15,3 +15,9 @@ test('Host: old, repeated or malformed pad messages are dropped', () => {
   }
   assert.notEqual(RemoteHost.parsePad({ t: 'pad', s: 0, b: 0 }, -1), null);
 });
+
+test('Host: a freeze report keeps only finite, bounded numbers', () => {
+  assert.deepEqual(RemoteHost.parseFreeze({ t: 'freeze', fc: 2, ms: 320.4, lost: 14, jit: 22, rtt: 48, fps: 41, drop: 3, jb: 30 }), { fc: 2, ms: 320, lost: 14, jit: 22, rtt: 48, fps: 41, drop: 3, jb: 30 });
+  assert.deepEqual(RemoteHost.parseFreeze({ t: 'freeze', fc: 1, ms: 'x', lost: Infinity, jit: NaN, rtt: -5, fps: {}, drop: null }), { fc: 1, ms: 0, lost: 0, jit: null, rtt: 0, fps: null, drop: 0, jb: null });
+  for (const m of [null, { t: 'pad', fc: 1 }, { t: 'freeze' }, { t: 'freeze', fc: 0 }, { t: 'freeze', fc: 1.5 }, { t: 'freeze', fc: '1' }]) assert.equal(RemoteHost.parseFreeze(m), null, JSON.stringify(m));
+});

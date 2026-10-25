@@ -30,6 +30,18 @@ body.native #screen{image-rendering:auto}
 #side details summary{cursor:pointer;font-size:13px;color:var(--mut)}#help{margin-top:6px;font-size:12px;line-height:1.6}
 @media (max-width:420px){#touch{zoom:.88}}
 .p3{background:#103a22;color:#7fe0a6}.p4{background:#3a1030;color:#f0a0dc}
+/* Which player you are, big and plain: it decides which pad of the emulator you drive. */
+.you{font-size:30px;font-weight:800;line-height:1.1;padding:12px 14px;border-radius:12px;text-align:center;letter-spacing:.5px}
+.you small{display:block;font-size:12px;font-weight:600;opacity:.8;letter-spacing:0;margin-top:2px}
+#ctl{font-size:13px;font-weight:600;color:var(--mut)}#ctl.ok{color:var(--ok)}#ctl.bad{color:var(--warn)}#ctl:empty{display:none}
+#padhint{font-size:12px;color:var(--warn);line-height:1.5}#padhint:empty{display:none}
+.mini{padding:4px 10px;font-size:12px}
+#flash{position:absolute;inset:0;z-index:35;display:none;align-items:center;justify-content:center;pointer-events:none;font-size:min(22vw,150px);font-weight:900;color:#fff;text-shadow:0 4px 24px #000,0 0 6px #000}
+#flash.on{display:flex;animation:flashout 5s forwards}
+@keyframes flashout{0%,70%{opacity:1}100%{opacity:0}}
+/* A tab that stepped aside because the room was opened somewhere else: silent, with a way back. */
+#quiet{position:absolute;inset:0;z-index:50;display:none;flex-direction:column;gap:12px;align-items:center;justify-content:center;padding:20px;text-align:center;background:rgba(10,12,22,.97);color:var(--txt);font-size:16px;line-height:1.5}
+#quiet.on{display:flex}#quiet b{font-size:20px}
 @media (min-width:900px) and (pointer:fine){
   body{height:100vh;height:100dvh;overflow:hidden}
   #app{flex-direction:row;height:100%;min-height:0}
@@ -63,6 +75,7 @@ body.touch #touch{display:grid}
 }
 </style>
 <script src="/webrtc.js"></script>
+<script src="/diag.js"></script>
 <script src="/pads.js"></script>
 <script src="/crt.js"></script>
 <script src="/hud.js"></script>
@@ -70,7 +83,9 @@ body.touch #touch{display:grid}
 <body>
 <div id="app">
 <div id="stage">
-  <div id="wrap"><div id="frame"><video id="screen" autoplay playsinline muted></video></div><button id="enter">▶ Tocá para entrar con sonido</button></div>
+  <div id="wrap"><div id="frame"><video id="screen" autoplay playsinline muted></video></div><button id="enter">▶ Tocá para entrar con sonido</button>
+    <div id="flash"></div>
+    <div id="quiet"><b>Abriste la sala en otra pestaña</b><span id="quietWhy">Seguí jugando ahí: esta quedó en silencio para que no se escuche doble ni compitan los controles.</span><button class="copy" id="takeover">Jugar desde esta pestaña</button></div></div>
   <div id="touch">
     <div id="shoulders"><button data-code="KeyQ" data-label="l">L</button><button data-code="KeyW" data-label="r">R</button></div>
     <div id="dpad"><i style="left:50%;top:16%">▲</i><i style="left:50%;top:84%">▼</i><i style="left:16%;top:50%">◀</i><i style="left:84%;top:50%">▶</i></div>
@@ -84,14 +99,17 @@ body.touch #touch{display:grid}
   </div>
 </div>
 <aside id="side">
-  <div id="head"><span class="pill p2" id="me">Invitado</span><span id="brand">🎮 RemoteGame</span></div>
+  <div class="you p2" id="me">Sos invitado</div>
+  <div id="head"><span id="brand">🎮 RemoteGame</span></div>
   <div id="title"></div>
   <div class="panel" id="status">Conectando…</div>
-  <div id="stats"><span id="net" class="mut"></span><span id="pad" class="mut"></span></div>
+  <div id="ctl" role="status"></div>
+  <div id="stats"><span id="net" class="mut"></span><span id="pad" class="mut"></span><button class="copy mini" id="scan" title="Volver a buscar el mando">🎮 Buscar mando</button></div>
+  <div id="padhint"></div>
   <div class="pick"><label>Pantalla<select id="crt"></select></label></div>
   <div class="btns"><button class="copy" id="reconnect" title="Si el video va lento después de cambiar de red">🔄 Reconectar</button><button class="copy" id="full">Pantalla completa</button></div>
   <details><summary>Controles</summary><div class="kbd" id="help">
-    <b>Tus controles (<span id="who">invitado</span>):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
+    <b>Tus controles (sos <span id="who">invitado</span>):</b> mando, o teclado <kbd>←↑↓→</kbd> · <kbd>Z</kbd> <kbd>X</kbd> <kbd>A</kbd> <kbd>S</kbd> botones · <kbd>Q</kbd> <kbd>W</kbd> gatillos · <kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select/Moneda. En el celu, los botones de la pantalla.<br>
     Mando: abajo, derecha, izquierda y arriba son B, A, Y y X (en Neo Geo, A, B, C y D). Si no aparece, apretá un botón con esta pestaña enfocada.
   </div></details>
 </aside>
@@ -102,7 +120,6 @@ body.touch #touch{display:grid}
   const status=$('status'), video=$('screen');
   const setStatus=text=>{status.textContent=text;};
   const media=new MediaStream();
-  video.srcObject=media;
   const crt=RemoteCRT.attach($('frame'),$('crt'));
   // Buttons work right away, even while the network setup below is still loading.
   $('enter').onclick=()=>{video.muted=false;video.play().catch(()=>{});$('enter').style.display='none';};
@@ -114,6 +131,9 @@ body.touch #touch{display:grid}
   let live=[];
   const iceServers=await fetch('/api/ice').then(r=>r.json()).catch(()=>undefined);
   let ws=null, rtc=null, player=0, roomFull=false, analog=false, native=false, seq=0, last=null, lastSent=0, keys={};
+  let quiet=false, quietBy=null, hasGame=false, hostAcks=false;   // quiet: this tab stepped aside; hasGame: the host has a game open
+  let startedAt=0, openedAt=0, ackAdvanceAt=0, ackSeq=-1, rearms=0, lastRearm=0;   // the controls link: when it started and opened, the host's last confirmation
+  let gPrev=null, pendingFreeze=null, freezeSends=0;   // the video's last stats reading, and a freeze the host has not confirmed yet
 
   const GAME_KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Enter','ShiftLeft','ShiftRight','KeyZ','KeyX','KeyA','KeyS','KeyQ','KeyW'];
   // The arrows and Space must never scroll the page, wherever the focus is.
@@ -195,11 +215,21 @@ body.touch #touch{display:grid}
   }
   setInterval(poll,4);
 
-  let padLine='';
-  setInterval(()=>{
+  let padLine='', padSent='', scanUntil=0;
+  function showPads(){
     const pads=navigator.getGamepads?navigator.getGamepads():[], text=RemotePads.padStatus(pads,live,false);
     if(text!==padLine){padLine=text;$('pad').textContent=text;$('pad').title=Array.from(pads).filter(Boolean).map(g=>g.id).join('\n');}
-  },400);
+    // A pad the browser does not show yet: say what makes it appear (the browser hides it until a button is pressed, no reload needed).
+    const seen=Array.from(pads).some(g=>g&&g.connected);
+    $('padhint').textContent=!live.length&&(seen||Date.now()<scanUntil)?'Apretá y soltá un botón del mando con esta pestaña al frente. Si sigue sin verse, apagalo y prendelo de nuevo: no hace falta recargar.':'';
+    // The host's "who is who" learns which pad this browser sees.
+    const name=live.length?RemotePads.padName(live[0].id):'';
+    if(name!==padSent&&ws&&ws.readyState===1){padSent=name;send({t:'info',pad:name});}
+  }
+  setInterval(showPads,400);
+  addEventListener('gamepadconnected',()=>{poll();showPads();});
+  addEventListener('gamepaddisconnected',()=>{poll();showPads();});
+  $('scan').onclick=()=>{scanUntil=Date.now()+10000;padLine='';$('pad').textContent='🎮 Buscando…';poll();showPads();};
 
   async function stats(){
     if(!rtc||!rtc.pc){ping.hide();$('net').textContent='';return;}
@@ -221,29 +251,85 @@ body.touch #touch{display:grid}
   let natTimer=null;
   function stopRtc(){
     clearTimeout(natTimer);
-    if(rtc){rtc.close();rtc=null;}
+    if(rtc){const old=rtc;rtc=null;old.close();}
     for(const track of media.getTracks())media.removeTrack(track);
+    openedAt=0;ackAdvanceAt=0;ackSeq=-1;gPrev=null;
   }
   // A fresh answerer per game: the host page that opens a game sends a new offer.
   function startRtc(){
     stopRtc();
-    rtc=new RemoteWebRTC({
+    startedAt=performance.now();
+    // Every callback checks it still belongs to the current call: a closed one fires its events late.
+    const mine=new RemoteWebRTC({
       isHost:false,iceServers,
       sendSignal:data=>send({t:'signal',data}),
-      onTrack:track=>{media.addTrack(track);video.play().catch(()=>{});},
-      onOpen:()=>{clearTimeout(natTimer);setStatus('✅ Conectado. Jugás como P'+player+'.');seq=0;last=null;poll();},
-      onClose:()=>{ping.hide();if(rtc)setStatus('Se cortó el video. Esperando al anfitrión…');},
+      onTrack:track=>{media.addTrack(track);if(video.srcObject!==media)video.srcObject=media;video.play().catch(()=>{});},
+      onOpen:()=>{if(rtc!==mine)return;clearTimeout(natTimer);openedAt=performance.now();setStatus('✅ Conectado. Jugás como P'+player+'.');seq=0;last=null;poll();},
+      onClose:()=>{ping.hide();if(rtc===mine)setStatus('Se cortó el video. Esperando al anfitrión…');},
+      onMessage:m=>{if(rtc===mine)onHostMessage(m);},
       // The route under the call died (e.g. 4G dropped): rebuild it instead of waiting.
       onState:state=>{
+        if(rtc!==mine)return;
         clearTimeout(dropTimer);
         if(state==='failed')reconnectNow('Se perdió la ruta de red');
         else if(state==='disconnected')dropTimer=setTimeout(()=>reconnectNow('Se cortó la red'),2000);
       }
     });
-    rtc.start();
+    rtc=mine;
+    mine.start();
     // No direct route between the two PCs and no TURN relay: nothing will flow.
-    natTimer=setTimeout(()=>{if(rtc&&!rtc.isOpen())setStatus('No se pudo conectar directo con el anfitrión (la red de alguno de los dos lo impide).\nHace falta un servidor TURN: el anfitrión lo configura con TURN_URLS en el servidor.');},15000);
+    natTimer=setTimeout(()=>{if(rtc===mine&&!mine.isOpen())setStatus('No se pudo conectar directo con el anfitrión (la red de alguno de los dos lo impide).\nHace falta un servidor TURN: el anfitrión lo configura con TURN_URLS en el servidor.');},15000);
   }
+
+  // The host confirms every second the last pad it received. That is what "your controls arrive" is made of: we send many a second,
+  // so the number it confirms must keep growing; confirmations that repeat the same number mean nothing is getting through.
+  function onHostMessage(m){
+    if(!m||m.t!=='ack'||!Number.isInteger(m.s))return;
+    // The host remembers a higher number than ours (from an older call): jump past it, or it would drop every pad as old.
+    if(m.s>seq)seq=m.s;
+    if(m.s>ackSeq){ackSeq=m.s;ackAdvanceAt=performance.now();}
+    if(m.s>0)rearms=0;
+    if(pendingFreeze&&m.f>=pendingFreeze.fc)pendingFreeze=null;
+  }
+  function drawCtl(){
+    const el=$('ctl'), now=performance.now();
+    let cls='', text='';
+    if(quiet||!hasGame||!hostAcks)text='';
+    else if(!rtc||!rtc.isOpen())text='Conectando los controles…';
+    else if(ackSeq>0&&now-ackAdvanceAt<3000){cls='ok';text='✓ Tus controles llegan al juego';}
+    else if(now-openedAt<3500)text='Probando que tus controles lleguen…';
+    else{cls='bad';text='⚠️ Tus controles no están llegando, reconectando…';}
+    if(el.textContent!==text)el.textContent=text;
+    el.className=cls;
+  }
+  setInterval(drawCtl,400);
+  // Rebuild the call by itself when the controls link is not there: it never opened, or the host stopped confirming. The host is
+  // asked for a new offer by announcing ourselves again; nothing to reload. After 3 tries in a row it only tries every 30 s.
+  function rearm(){
+    lastRearm=performance.now();rearms++;
+    stopRtc();
+    setStatus('Reconectando los controles…');
+    send({t:'guest',id:guestId,label:deviceLabel()});
+  }
+  setInterval(()=>{
+    if(quiet||!hasGame||roomFull||!ws||ws.readyState!==1)return;   // nothing to watch, or the socket is already reconnecting
+    const now=performance.now();
+    if(now-lastRearm<4000||(rearms>=3&&now-lastRearm<30000))return;
+    if(!rtc){if(now-Math.max(startedAt,lastRearm)>5000)rearm();return;}
+    if(!rtc.isOpen()){if(now-startedAt>5000+3000*Math.min(rearms,3))rearm();return;}
+    if(hostAcks&&now-Math.max(ackAdvanceAt,openedAt)>4000)rearm();
+  },1000);
+
+  // Why a video froze, for the host's log: every 2 s the video's stats; a new freeze goes to the host (and again until it confirms).
+  setInterval(async()=>{
+    if(!rtc||!rtc.pc||!window.RemoteDiag)return;
+    let report;try{report=await rtc.pc.getStats();}catch(e){return;}
+    const cur=RemoteDiag.guestSample(report);
+    if(!cur)return;
+    const freeze=RemoteDiag.guestFreeze(gPrev,cur);gPrev=cur;
+    if(freeze){pendingFreeze=freeze;freezeSends=0;}
+    if(pendingFreeze&&freezeSends<5&&rtc&&rtc.isOpen()){rtc.send(Object.assign({t:'freeze'},pendingFreeze));freezeSends++;}
+  },2000);
 
   // A stable id is the seat: a reload or a network switch comes back as the same player (P2-P4).
   // If storage is blocked, one per page load: the seat is kept while this tab stays open.
@@ -255,49 +341,100 @@ body.touch #touch{display:grid}
       return id;
     } catch(e){ return fresh(); }
   })();
+  // Your number decides which pad of the emulator you drive: big in the column, and flashed over the picture when it is (re)assigned.
   function setPlayer(n){
+    const changed=player!==n;
     player=n;
-    $('me').textContent='P'+n+' · invitado';$('me').className='pill p'+n;$('who').textContent='P'+n;
+    const me=$('me');
+    me.textContent='Sos P'+n;me.className='you p'+n;
+    const small=document.createElement('small');small.textContent='tu lugar en el juego';me.append(small);
+    $('who').textContent='P'+n;
+    if(changed){const fl=$('flash');fl.textContent='Sos P'+n;fl.className='';void fl.offsetWidth;fl.className='on';}
   }
+  // What the host sees next to the seat: "PC · Chrome" or "Celu · Chrome".
+  function deviceLabel(){
+    const ua=navigator.userAgent||'';
+    const kind=/Android|iPhone|iPad|Mobile/i.test(ua)?'Celu':'PC';
+    const br=ua.includes('Edg/')?'Edge':ua.includes('OPR/')?'Opera':ua.includes('Firefox/')?'Firefox':ua.includes('Chrome/')?'Chrome':ua.includes('Safari/')?'Safari':'';
+    return kind+(br?' · '+br:'');
+  }
+
+  // The same browser opening the room in another tab: the older tab goes completely quiet (no sound, no video, no controls) and says why.
+  // BroadcastChannel tells it at once; the server's "replaced" covers the same guest on another browser or device.
+  const tabId=Math.random().toString(36).slice(2);
+  let claimAt=0, bc=null;
+  try{bc=new BroadcastChannel('remotegame-sala');}catch(e){}
+  const claim=()=>{claimAt=Date.now();if(bc)bc.postMessage({t:'claim',tab:tabId,at:claimAt});};
+  function quietDown(why,by){
+    if(quiet)return;
+    quiet=true;quietBy=by||null;hasGame=false;
+    clearTimeout(retryTimer);clearTimeout(dropTimer);
+    stopRtc();keys={};touch={};fingers.clear();
+    if(ws){const old=ws;ws=null;try{old.close();}catch(e){}}
+    ping.hide();video.pause();
+    $('quietWhy').textContent=why;$('quiet').classList.add('on');
+    setStatus('Abriste la sala en otra pestaña. Esta quedó en silencio.');
+    drawCtl();
+  }
+  // The way back: this tab takes the seat again and the other one goes quiet.
+  function wake(){
+    if(!quiet)return;
+    quiet=false;quietBy=null;replaced=false;lastReconnect=0;
+    $('quiet').classList.remove('on');
+    setStatus('Conectando…');
+    claim();connect();
+  }
+  $('takeover').onclick=wake;
+  if(bc)bc.onmessage=ev=>{
+    const m=ev.data||{};
+    if(m.tab===tabId)return;
+    // Two tabs opened at the same moment: the one that claimed last stays (the id breaks a tie).
+    if(m.t==='claim'&&(m.at>claimAt||(m.at===claimAt&&m.tab>tabId)))quietDown('Seguí jugando en esa otra pestaña. Esta quedó en silencio para que no se escuche doble ni compitan los controles.',m.tab);
+    else if(m.t==='bye'&&quiet&&quietBy===m.tab&&document.visibilityState==='visible')wake();
+  };
+  addEventListener('pagehide',()=>{if(bc)bc.postMessage({t:'bye',tab:tabId});});
+
   // Permanent room: stay connected and follow whatever game the host opens.
   let replaced=false, dropTimer=null, retryTimer=null, lastReconnect=0;
   const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));};
   // Exactly one socket at a time: a second one would take the guest seat from the first.
   function connect(){
+    if(quiet)return;
     clearTimeout(retryTimer);
     if(ws){const old=ws;ws=null;try{old.close();}catch(e){}}
     const socket=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
     ws=socket;
-    socket.onopen=()=>send({t:'guest',id:guestId});
+    socket.onopen=()=>{padSent='';send({t:'guest',id:guestId,label:deviceLabel()});showPads();};
     socket.onclose=()=>{
-      if(replaced||ws!==socket)return;
+      if(replaced||quiet||ws!==socket)return;
       // Room full: look again now and then, a seat may free up.
       if(roomFull){retryTimer=setTimeout(connect,5000);return;}
       if(!rtc||!rtc.isOpen())setStatus('Reconectando con el servidor…');
       retryTimer=setTimeout(connect,2000);
     };
     socket.onmessage=ev=>{
-      if(ws!==socket)return;
+      if(ws!==socket||quiet)return;
       let m;try{m=JSON.parse(ev.data);}catch{return;}
       if(m.t==='game'){
         roomFull=false;
         if(m.player)setPlayer(m.player);
-        if(!m.game){stopRtc();$('title').textContent='';setStatus('Esperando que el anfitrión abra un juego…');return;}
+        if(!m.game){hasGame=false;stopRtc();$('title').textContent='';setStatus('Esperando que el anfitrión abra un juego…');return;}
+        hasGame=true;hostAcks=!!m.game.ack;
         // analog: both sticks go to the host. A streamed native emulator announces it (and gets Xbox labels,
         // the capture's own proportion and its own CRT pick, off at first); N64 is analog by core.
         native=!!m.game.analog;analog=native||m.game.core==='n64';
         $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native);crt.setCore(m.game.core);fit();
         setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
-      } else if(m.t==='host-left'){stopRtc();setStatus('El anfitrión está cambiando de juego…');}
+      } else if(m.t==='host-left'){hasGame=false;stopRtc();setStatus('El anfitrión está cambiando de juego…');}
       else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
-      else if(m.t==='replaced'){replaced=true;stopRtc();setStatus('Abriste la sala en otra pestaña o dispositivo. Seguí jugando ahí.');}
-      else if(m.t==='full'){roomFull=true;stopRtc();setStatus('La sala está llena: ya hay 4 jugadores.\nSi alguien se va, entrás solo; probamos de nuevo cada pocos segundos.');socket.close();}
+      else if(m.t==='replaced'){replaced=true;quietDown('Abriste la sala en otra pestaña o en otro dispositivo. Seguí jugando ahí: esta quedó en silencio para que no se escuche doble ni compitan los controles.');}
+      else if(m.t==='full'){roomFull=true;hasGame=false;stopRtc();setStatus('La sala está llena: ya hay 4 jugadores.\nSi alguien se va, entrás solo; probamos de nuevo cada pocos segundos.');socket.close();}
       else if(m.t==='error'){setStatus('❌ '+m.msg);}
     };
   }
   // Switching WiFi/4G leaves the call on the old route: start over on the new one right away.
   function reconnectNow(reason){
-    if(replaced||Date.now()-lastReconnect<3000)return;
+    if(replaced||quiet||Date.now()-lastReconnect<3000)return;
     lastReconnect=Date.now();
     clearTimeout(dropTimer);
     stopRtc();
@@ -307,6 +444,7 @@ body.touch #touch{display:grid}
   if(navigator.connection)navigator.connection.addEventListener('change',()=>reconnectNow('Cambió la red'));
   addEventListener('online',()=>reconnectNow('Volvió la conexión'));
   $('reconnect').onclick=()=>{lastReconnect=0;reconnectNow('Reconectando');};
+  claim();
   connect();
 })();
 </script>

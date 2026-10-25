@@ -6,6 +6,8 @@
 <title>RemoteGame - Mis juegos</title>
 <link rel="stylesheet" href="/style.css">
 <script src="/share.js"></script>
+<script src="/pads.js"></script>
+<script src="/hud.js"></script>
 <style>
 main.wide{max-width:1560px}
 .topbar{margin-top:12px;padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
@@ -23,6 +25,9 @@ main.wide{max-width:1560px}
 .playing .pl-note{color:var(--mut)}
 .playing .pl-note a{color:var(--acc)}
 .playing .pl-warn:empty,.playing .pl-note:empty{display:none}
+.playing .pl-pads{grid-column:1/-1;display:flex;flex-direction:column;gap:4px}.playing .pl-pads[hidden]{display:none}
+.playing .pl-pads h3{margin:0;font-size:12px;font-weight:600;color:var(--mut)}
+.playing .pl-eden{font-size:12px;line-height:1.5}.playing .pl-eden:empty{display:none}.playing .pl-eden.warn{color:var(--warn)}.playing .pl-eden.ok{color:var(--ok)}
 .lib{display:grid;grid-template-columns:220px minmax(0,1fr);gap:20px;align-items:start;margin-top:10px}
 .side{position:sticky;top:12px;display:flex;flex-direction:column;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px}
 .side h2{margin:4px 10px 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
@@ -120,6 +125,7 @@ button.go:disabled{opacity:.6;cursor:default}
       <div class="pl-title" id="plTitle" aria-live="polite"></div>
       <div class="pl-acts"><button type="button" class="main" id="plRe" hidden>Volver a transmitir</button><button type="button" id="plStop">Terminar</button></div>
       <div class="pl-warn" id="plWarn" role="alert"></div>
+      <div class="pl-pads" id="plPads" hidden><h3>Probar controles: lo que aprietan tus amigos</h3><div id="plLights"></div><div class="pl-eden" id="plEden"></div></div>
       <div class="pl-note" id="plNote"></div>
     </div>
     <div id="party"></div>
@@ -237,8 +243,8 @@ function playCall(path,method){
 }
 function drawPlaying(j){
   var box=$('playing');
-  if(!j||!j.running){box.hidden=true; return;}
-  box.hidden=false;
+  if(!j||!j.running){box.hidden=true; watchPads(false); return;}
+  box.hidden=false; playSystem=j.system||''; watchPads(true);
   var t=$('plTitle'); t.textContent='';
   var b=document.createElement('b'); b.textContent='🖥️ Jugando '+j.name+' en la PC';
   t.append(b,STREAM_TEXT[j.stream]||'');
@@ -247,6 +253,29 @@ function drawPlaying(j){
   $('plWarn').textContent=(j.warnings||[]).join('\n');
   var n=PLAY_NOTES[j.system], note=$('plNote'); note.textContent='';
   if(n){var l=document.createElement('a'); l.href=README+n[1]; l.target='_blank'; l.rel='noopener'; l.textContent='Ver cómo'; note.append(n[0]+'. ',l,'.');}
+}
+// The test of the controls: while a game is open on the PC, what each friend presses lights up (read from the virtual pads, a few times a second),
+// and in words whether Eden reads the UDP pads. A friend who is in the room but whose pad never arrived shows "sin señal".
+var padTimer=null, padLights=null, playSystem='', partySeats=[], padTick=0;
+function watchPads(on){
+  if(!on){ clearInterval(padTimer); padTimer=null; $('plPads').hidden=true; return; }
+  if(padTimer) return;
+  padTimer=setInterval(function(){
+    var party=(padTick++%8===0)?fetch('/api/party').then(function(r){return r.json();}).then(function(p){partySeats=p.slots||[];}).catch(function(){}):Promise.resolve();
+    party.then(function(){return fetch('/api/vpad').then(function(r){return r.json();});}).then(function(v){
+      padLights=padLights||RemoteHUD.padLights($('plLights'));
+      var shown=[];
+      (v.slots||[]).forEach(function(s,i){
+        if(s.connected){ shown.push(i); padLights.set(i+2,s,s.at); }
+        else if(partySeats.indexOf(i)>=0){ shown.push(i); padLights.set(i+2,RemotePads.EMPTY,1); }
+      });
+      padLights.players().forEach(function(p){ if(shown.indexOf(p-2)<0) padLights.drop(p); });
+      $('plPads').hidden=!shown.length;
+      // MAME takes keys, not UDP pads: the Eden line only for Switch (or a game of unknown kind).
+      var text=playSystem&&playSystem!=='switch'?'':RemotePads.edenLine(v.dsu,partySeats);
+      var el=$('plEden'); el.textContent=text; el.className='pl-eden'+(text.indexOf('⚠')===0?' warn':text?' ok':'');
+    }).catch(function(){});
+  },250);
 }
 function pollPlaying(){
   playCall('/api/launch/state').then(function(j){

@@ -145,7 +145,8 @@ function startDsu(options, state) {
   bind();
 
   return {
-    status: () => ({ on: dsu.on, port: dsu.port ?? (dsu.on ? null : want), clients: live().length, error: dsu.error }),
+    // clients: programs subscribed for pad data (Eden); watching[i]: does any of them ask for slot i (P2-P4)?
+    status: () => { const now = live(); return { on: dsu.on, port: dsu.port ?? (dsu.on ? null : want), clients: now.length, watching: [0, 1, 2].map(i => now.some(sub => wants(sub, i))), error: dsu.error }; },
     // A slot changed: tell the subscribers right away (the timer keeps them fed in between).
     changed(i) { if (!socket) return; for (const sub of live()) sendTo(sub, i); ensureTimer(); },
     // A guest left: one stale packet (same counter again) so Eden drops the pad; nothing more is sent for it.
@@ -278,7 +279,7 @@ function spawnKeyHelper(targets, onLine, onExit) {
 // options: dsu (false = off), dsuPort (default 26760, 0 = any free one), dsuHost, dsuTtl, dsuRate;
 // keys (false = off), keyTargets (default ['mame.exe']), keyHelper(targets, onLine, onExit) -> { send, close } (tests inject a fake).
 function createVpad(options = {}) {
-  const slots = [0, 1, 2].map(() => ({ connected: false, b: 0, x: 0, y: 0, rx: 0, ry: 0 }));
+  const slots = [0, 1, 2].map(() => ({ connected: false, b: 0, x: 0, y: 0, rx: 0, ry: 0, at: 0 }));   // at: when the guest's latest state arrived
   const dsu = options.dsu === false ? null : startDsu(options, { slots });
   const targets = (options.keyTargets || ['mame.exe']).map(t => String(t).toLowerCase());
   const makeHelper = options.keyHelper || (process.platform === 'win32' ? spawnKeyHelper : null);
@@ -334,20 +335,20 @@ function createVpad(options = {}) {
       const s = slots[slot];
       const next = { b: int(st.b, 0, 0xffff), x: int(st.x, -127, 127), y: int(st.y, -127, 127), rx: int(st.rx, -127, 127), ry: int(st.ry, -127, 127) };
       const changed = !s.connected || next.b !== s.b || next.x !== s.x || next.y !== s.y || next.rx !== s.rx || next.ry !== s.ry;
-      Object.assign(s, next, { connected: true });
+      Object.assign(s, next, { connected: true, at: Date.now() });
       if (changed && dsu) dsu.changed(slot);
       setKeys(slot, keysFor(slot, s));
     },
     release(slot) {
       if (!valid(slot) || !slots[slot].connected) return;
       const s = slots[slot];
-      Object.assign(s, { connected: false, b: 0, x: 0, y: 0, rx: 0, ry: 0 });
+      Object.assign(s, { connected: false, b: 0, x: 0, y: 0, rx: 0, ry: 0, at: 0 });
       if (dsu) dsu.gone(slot);
       setKeys(slot, new Set());
     },
     releaseAll() { for (let i = 0; i < 3; i++) api.release(i); },
     status: () => ({
-      dsu: dsu ? dsu.status() : { on: false, port: null, clients: 0, error: null },
+      dsu: dsu ? dsu.status() : { on: false, port: null, clients: 0, watching: [false, false, false], error: null },
       keys: { on: keys.enabled && !keys.error, targets, error: keys.error },
       slots: slots.map((s, slot) => ({ slot, ...s }))
     }),

@@ -39,6 +39,7 @@
 }
 </style>
 <script src="/webrtc.js"></script>
+<script src="/diag.js"></script>
 <script src="/host.js"></script>
 <script src="/pads.js"></script>
 <script src="/share.js"></script>
@@ -58,7 +59,7 @@
       <div id="status">Conectando…</div>
     </div>
     <div class="panel" id="localStatus" style="display:none"></div>
-    <div id="stats"><span id="efps" title="Cuadros por segundo del emulador en esta PC"></span><span id="pad" class="mut"></span></div>
+    <div id="stats"><span id="efps" title="Cuadros por segundo del emulador en esta PC"></span><span id="pad" class="mut"></span><button class="copy" id="scan" style="padding:3px 10px;font-size:12px" title="Volver a buscar el mando">🎮 Buscar mando</button></div>
     <div class="pick"><label id="coreBox">Emulador<select id="core"></select></label><label>Pantalla<select id="crt"></select></label></div>
     <a id="switch"></a>
     <details id="helpbox"><summary>Controles</summary><div class="kbd" id="help"></div></details>
@@ -191,6 +192,10 @@
     };
     setInterval(()=>{live=input.pads(read());},8);
     setInterval(show,400);
+    // The browser hides a pad until a button is pressed with this tab in front: look again the moment it shows up, or on request.
+    const look=()=>{live=input.pads(read());show();};
+    addEventListener('gamepadconnected',look);addEventListener('gamepaddisconnected',look);
+    $('scan').onclick=()=>{line='';$('pad').textContent='🎮 Buscando… apretá y soltá un botón del mando';look();};
     show();
   }
 

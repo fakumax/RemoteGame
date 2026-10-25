@@ -14,7 +14,7 @@ test('browserArgs: headless by default (no window, no taskbar entry, no sharing 
   const title = 'Killer Instinct 2 [kinst2] - MAME 0.288 (LLP64)';
   const common = [
     '--auto-select-window-capture-source-by-title=' + title,
-    '--system-audio-capture-default_checked',
+    '--system-audio-capture-default_checked', '--autoplay-policy=no-user-gesture-required',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion',
     '--app=' + url
   ];
@@ -30,6 +30,9 @@ test('browserArgs: headless by default (no window, no taskbar entry, no sharing 
   const screen = browserArgs({ profile: 'p', url, capture: { screen: true } });
   assert.ok(screen.includes('--auto-select-screen-capture-source') && !screen.some(a => a.includes('window-capture')));
   assert.ok(screen.includes('--system-audio-capture-default_checked') && screen.includes('--headless=new'));
+  // The emulator's own audio (process capture) reaches the page by itself: no system-audio switch, but the page's AudioContext may run unattended.
+  const own = browserArgs({ profile: 'p', url, capture: { title }, processAudio: true });
+  assert.ok(!own.includes('--system-audio-capture-default_checked') && own.includes('--autoplay-policy=no-user-gesture-required'));
 });
 
 test('asciiTitle: the switch ignores anything that is not plain ASCII, so only the longest plain stretch is used', () => {
@@ -213,5 +216,27 @@ test('streamer: the browser starts headless unless told otherwise', async () => 
   r = rig({ headless: false });
   await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
   assert.ok(!r.spawns[0].args.includes('--headless=new') && r.spawns[0].args.includes('--window-position=-32000,-32000'));
+  await r.streamer.close();
+});
+
+test('streamer: the system-audio switch is left out only when the emulator own audio is ready', async () => {
+  let r = rig({ processAudio: async () => true });
+  await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+  assert.ok(!r.spawns[0].args.includes('--system-audio-capture-default_checked'));
+  await r.streamer.close();
+  // Failed (false), throwing or absent: the system audio, as always.
+  for (const processAudio of [async () => false, async () => { throw new Error('boom'); }, undefined]) {
+    r = rig({ processAudio });
+    await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+    assert.ok(r.spawns[0].args.includes('--system-audio-capture-default_checked'));
+    await r.streamer.close();
+  }
+  // The screen fallback asks again: the audio can have failed in between.
+  let ok = true;
+  r = rig({ processAudio: async () => ok });
+  await r.streamer.start({ pid: 4242, name: 'x', system: 'arcade' });
+  ok = false;
+  await until(() => r.spawns.length === 2);
+  assert.ok(!r.spawns[0].args.includes('--system-audio-capture-default_checked') && r.spawns[1].args.includes('--system-audio-capture-default_checked'));
   await r.streamer.close();
 });

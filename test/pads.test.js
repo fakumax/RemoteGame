@@ -174,3 +174,21 @@ test('Pads: host input maps the N64 keyboard stick and C buttons', () => {
   input.pads([pad(DUALSENSE, [], [0, -1, 0, 0])]);
   assert.ok(calls.some(([, i, v]) => i === 19 && v === 0x7fff), 'left stick up');
 });
+
+test('Pads: describe names what a guest holds, Xbox style', () => {
+  assert.deepEqual(pads.describe({ b: 0, x: 0, y: 0, rx: 0, ry: 0 }), []);
+  assert.deepEqual(pads.describe({ b: (1 << 4) | 1 | (1 << 11), x: 0, y: 0, rx: 0, ry: 0 }), ['↑', 'A', 'RB']);
+  assert.deepEqual(pads.describe({ b: 1 << 3, x: -100, y: 10, rx: 0, ry: 90 }), ['MENÚ', 'stick ←', 'stick der. ↓']);
+  assert.deepEqual(pads.describe({ b: 0, x: 20, y: -30, rx: 0, ry: 0 }), [], 'a small stick move is nothing');
+  assert.deepEqual(pads.describe(null), []);
+});
+
+test('Pads: the host is told in words whether Eden reads the UDP pads', () => {
+  const on = { on: true, clients: 1, watching: [true, true, true], error: null };
+  assert.equal(pads.edenLine(on, []), '', 'nobody playing: nothing to say');
+  assert.equal(pads.edenLine(on, [0, 1]), '✓ Eden conectado a los mandos');
+  assert.equal(pads.edenLine({ ...on, clients: 0, watching: [false, false, false] }, [0]), '⚠️ Eden no está leyendo los mandos UDP (configurá P2–P4)');
+  assert.match(pads.edenLine({ ...on, watching: [true, false, true] }, [0, 1]), /no está pidiendo los datos de P3/);
+  assert.match(pads.edenLine({ on: false, clients: 0, error: 'El puerto 26760 está ocupado' }, [0]), /no están disponibles \(El puerto 26760 está ocupado\)/);
+  assert.match(pads.padStatus([], [], false), /apretá un botón del mando para que el navegador lo vea/);
+});

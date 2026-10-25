@@ -21,8 +21,8 @@
     try { info = await fetch('/api/party').then(r => r.json()); } catch (e) {}
     box.textContent = '';
     for (const base of info.lanUrls || []) box.append(row('Misma red (WiFi/cable de tu casa):', base + path));
-    if (info.publicUrl) box.append(row('Por Internet (celu o desde otra casa):', info.publicUrl + path, 'ngrok puede mostrar un aviso la primera vez: tocar "Visit Site".'));
-    else box.append(row('Por Internet:', 'no disponible', 'El túnel de ngrok no está abierto.'));
+    if (info.publicUrl) box.append(row('Por Internet (celu o desde otra casa):', info.publicUrl + path));
+    else box.append(row('Por Internet:', 'no disponible', 'El túnel no está abierto.'));
     return info;
   }
   // Styles of the bar: one line on a desktop, the parts wrap on a phone.
@@ -76,8 +76,8 @@
     box.replaceChildren(bar);
     function paint() {
       tog.setAttribute('aria-checked', String(tunnel.state === 'on' || tunnel.state === 'starting'));
-      tog.title = { off: 'Prendelo para que se pueda entrar desde Internet', starting: 'Abriendo túnel…', on: 'Encendido: se puede entrar desde Internet', error: 'No se pudo abrir el túnel' }[tunnel.state] || '';
-      st.textContent = tunnel.state === 'starting' ? 'Abriendo túnel…' : tunnel.state === 'error' ? 'No se pudo abrir el túnel' + (tunnel.error ? ': ' + tunnel.error : '') : '';
+      tog.title = tunnel.state === 'starting' && tunnel.msg ? tunnel.msg : { off: 'Prendelo para que se pueda entrar desde Internet', starting: 'Abriendo túnel…', on: 'Encendido: se puede entrar desde Internet', error: 'No se pudo abrir el túnel' }[tunnel.state] || '';
+      st.textContent = tunnel.state === 'starting' ? (tunnel.msg || 'Abriendo túnel…') : tunnel.state === 'error' ? 'No se pudo abrir el túnel' + (tunnel.error ? ': ' + tunnel.error : '') : '';
       st.classList.toggle('warn', tunnel.state === 'error');
     }
     // Only this PC gets the switch: a guest's page is answered with 403. null means not known yet.
@@ -107,7 +107,8 @@
       paint();
       const lan = info.lanUrls || [];
       const players = info.players || (info.guest ? [2] : []);
-      const key = JSON.stringify([info.publicUrl, lan, players]);
+      const who_ = info.who || players.map(p => ({ player: p, label: '', pad: '' }));
+      const key = JSON.stringify([info.publicUrl, lan, players, who_]);
       if (key === last) return;
       last = key;
       // The Internet link when the tunnel is up; without it, the home-network one takes its place.
@@ -116,8 +117,9 @@
       if (first) { main = addr(first, info.publicUrl ? '' : 'solo red de casa'); main.prepend('🔗 '); }
       else { main = document.createElement('span'); main.className = 'sh-lnk'; main.textContent = '🔗 sin dirección'; main.title = 'No encontré ninguna dirección de red de esta PC.'; }
       const who = document.createElement('span'); who.className = 'sh-who' + (players.length ? ' on' : '');
+      // Who is who: "P2 (PC · Chrome, mando de Xbox)". Two players with the same device are two tabs or two devices of one friend.
       who.textContent = players.length
-        ? '👥 ' + players.map(p => 'P' + p).join(', ') + (players.length === 1 ? ' conectado' : ' conectados')
+        ? '👥 ' + who_.map(w => 'P' + w.player + (w.label || w.pad ? ' (' + [w.label, w.pad].filter(Boolean).join(', ') + ')' : '')).join(' · ') + (players.length === 1 ? ' conectado' : ' conectados')
         : '👥 Nadie conectado';
       const rest = info.publicUrl ? lan : lan.slice(1);
       const sum = document.createElement('summary'); sum.textContent = 'otras direcciones';

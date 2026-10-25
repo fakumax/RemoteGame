@@ -360,7 +360,9 @@ test('input is validated: bad seats and garbage values are ignored or clamped', 
     v.update(0, null); v.release(7); v.release('x');
     assert.equal(v.status().slots.some(s => s.connected), false);
     v.update(0, { b: 0x1ffff, x: 9999, y: -9999, rx: 'a', ry: NaN });
-    assert.deepEqual(v.status().slots[0], { slot: 0, connected: true, b: 0xffff, x: 127, y: -127, rx: 0, ry: 0 });
+    const { at, ...slot } = v.status().slots[0];
+    assert.deepEqual(slot, { slot: 0, connected: true, b: 0xffff, x: 127, y: -127, rx: 0, ry: 0 });
+    assert.ok(Math.abs(Date.now() - at) < 2000, 'at: when the state arrived');
   } finally { await v.close(); }
 });
 
@@ -424,4 +426,22 @@ test('keys helper: the real PowerShell compiles SendInput and answers "status" w
   }
   assert.ok(lines.includes('bye'));
   assert.equal(exit ?? null, null);
+});
+
+test('DSU status: how many programs read the pads and which slots they ask for', async () => {
+  const v = newVpad({ dsuTtl: 250 }), a = await client(v);
+  try {
+    assert.equal(v.status().dsu.clients, 0);
+    assert.deepEqual(v.status().dsu.watching, [false, false, false]);
+    a.ask(padReq(1, 2));                               // only DSU pad 2 = seat 1
+    await sleep(40);
+    assert.equal(v.status().dsu.clients, 1);
+    assert.deepEqual(v.status().dsu.watching, [false, true, false]);
+    a.ask(padReq(0, 0));                               // every pad
+    await sleep(40);
+    assert.deepEqual(v.status().dsu.watching, [true, true, true]);
+    await sleep(350);
+    assert.equal(v.status().dsu.clients, 0, 'stops counting once it stops asking');
+    assert.deepEqual(v.status().dsu.watching, [false, false, false]);
+  } finally { a.close(); await v.close(); }
 });

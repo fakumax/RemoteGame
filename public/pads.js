@@ -133,8 +133,8 @@
       return '🎮 ' + names.join(perPlayer ? ' · ' : ' + ') + (live.length > 1 ? ' conectados' : ' conectado');
     }
     // Browsers hide a pad until a button is pressed with the tab focused.
-    if (Array.from(gamepads || []).some(g => g && g.connected)) return '🎮 Mando detectado: apretá cualquier botón';
-    return '🎮 Ningún mando: conectalo y apretá cualquier botón';
+    if (Array.from(gamepads || []).some(g => g && g.connected)) return '🎮 Mando detectado: apretá un botón del mando para activarlo';
+    return '🎮 Ningún mando: apretá un botón del mando para que el navegador lo vea';
   }
 
   // Returns { b: bitmask of RetroPad 0-15, x, y: left stick, rx, ry: right stick, all in -127..127 }.
@@ -218,7 +218,33 @@
     };
   }
 
+  // What a state holds, in the words of a guest's Xbox-style buttons: ['↑', 'A', 'RB']. Empty when nothing is pressed.
+  const XBOX = { 4: '↑', 5: '↓', 6: '←', 7: '→', 0: 'A', 8: 'B', 1: 'X', 9: 'Y', 10: 'LB', 11: 'RB', 12: 'LT', 13: 'RT', 2: 'VIEW', 3: 'MENÚ', 14: 'L3', 15: 'R3' };
+  function describe(st) {
+    const out = [];
+    if (!st) return out;
+    for (const i of [4, 5, 6, 7, 0, 8, 1, 9, 10, 11, 12, 13, 2, 3, 14, 15]) if ((st.b >> i) & 1) out.push(XBOX[i]);
+    const stick = (x, y, name) => {
+      if (Math.abs(x) < 40 && Math.abs(y) < 40) return;
+      out.push(name + (Math.abs(x) >= Math.abs(y) ? (x < 0 ? '←' : '→') : (y < 0 ? '↑' : '↓')));
+    };
+    stick(st.x | 0, st.y | 0, 'stick ');
+    stick(st.rx | 0, st.ry | 0, 'stick der. ');
+    return out;
+  }
+
+  // Is Eden reading the UDP pads? dsu: vpad's status().dsu; seats: the guests' seats (0 = P2). Words for the host, '' when there is nothing to say.
+  function edenLine(dsu, seats) {
+    if (!seats || !seats.length) return '';
+    if (!dsu || !dsu.on) return '⚠️ Los mandos UDP para Eden no están disponibles' + (dsu && dsu.error ? ' (' + dsu.error + ')' : '');
+    if (!dsu.clients) return '⚠️ Eden no está leyendo los mandos UDP (configurá P2–P4)';
+    const unread = seats.filter(s => dsu.watching && dsu.watching[s] === false);
+    if (unread.length) return '⚠️ Eden no está pidiendo los datos de ' + unread.map(s => 'P' + (s + 2)).join(', ') + ' (configurá ese jugador como mando UDP)';
+    return '✓ Eden conectado a los mandos';
+  }
+
   const api = {
+    describe, edenLine,
     PAD, KEYS_SOLO, KEYS_P1_SHARED, KEYS_P2_SHARED, KEYS_N64, ejsControls, codeMap, readGuest, applyGuest,
     padName, padState, padTracker, padStatus, hostInput, EMPTY: { b: 0, x: 0, y: 0, rx: 0, ry: 0 }
   };

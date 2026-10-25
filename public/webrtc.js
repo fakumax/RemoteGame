@@ -23,6 +23,23 @@
     } catch (e) { return false; }
   }
 
+  // Opus defaults to mono at ~32 kbps; a game's audio is stereo. The offer asks for stereo and 128 kbps in Opus's fmtp line; the sender
+  // only encodes stereo if the ANSWER says stereo=1 too, so the guest adds it to its answer (bitrate false: the answer does not set one).
+  // Only that line changes; an SDP without Opus comes back as it was.
+  function opusStereo(sdp, bitrate = true) {
+    const rtp = /a=rtpmap:(\d+) opus\/48000\/2/i.exec(sdp);
+    if (!rtp) return sdp;
+    const pt = rtp[1], want = { stereo: '1', 'sprop-stereo': '1', ...(bitrate ? { maxaveragebitrate: '128000' } : {}) };
+    const wanted = Object.entries(want).map(([k, v]) => k + '=' + v);
+    const fmtp = new RegExp('a=fmtp:' + pt + ' ([^\\r\\n]*)');
+    const found = fmtp.exec(sdp);
+    if (found) {
+      const params = found[1].split(';').filter(p => p && !(p.split('=')[0] in want));
+      return sdp.replace(fmtp, () => 'a=fmtp:' + pt + ' ' + params.concat(wanted).join(';'));
+    }
+    return sdp.replace(rtp[0], line => line + '\r\na=fmtp:' + pt + ' ' + wanted.join(';'));
+  }
+
   class RemoteWebRTC {
     constructor(options = {}) {
       this.isHost = !!options.isHost;
@@ -37,6 +54,8 @@
       this.media = !!options.media;
       this.iceServers = options.iceServers || ICE_SERVERS;
       this.codec = options.codec || null;
+      // Stereo Opus in the offer (host streaming only); false keeps the browser's own mono default.
+      this.stereo = options.stereo !== false;
       this.videoSender = null;
       this.audioSender = null;
       this.videoTransceiver = null;
@@ -149,7 +168,8 @@
         }
 
         try {
-          const offer = await this.pc.createOffer();
+          let offer = await this.pc.createOffer();
+          if (this.media && this.stereo && offer.sdp) offer = { type: offer.type, sdp: opusStereo(offer.sdp) };
           await this.pc.setLocalDescription(offer);
           this.sendSignal({ sdp: this.pc.localDescription });
         } catch (e) {
@@ -179,7 +199,9 @@
           }
 
           if (desc.type === 'offer') {
-            const answer = await this.pc.createAnswer();
+            let answer = await this.pc.createAnswer();
+            // The host asked for stereo audio: agree, or it goes out mono.
+            if (/a=fmtp:\d+ [^\r\n]*stereo=1/.test(desc.sdp) && answer.sdp) answer = { type: answer.type, sdp: opusStereo(answer.sdp, false) };
             await this.pc.setLocalDescription(answer);
             this.sendSignal({ sdp: this.pc.localDescription });
           }
@@ -258,6 +280,7 @@
     }
   }
   RemoteWebRTC.preferCodec = preferCodec;
+  RemoteWebRTC.opusStereo = opusStereo;
 
   if (typeof module !== 'undefined') module.exports = RemoteWebRTC;
   else root.RemoteWebRTC = RemoteWebRTC;

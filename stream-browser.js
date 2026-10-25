@@ -2,7 +2,9 @@
 // Chromium flags (checked on Edge 156 and Chrome 155 against the picker's own source, desktop_media_list_controller.cc):
 //   --auto-select-window-capture-source-by-title=<text>  picks the first window whose title CONTAINS text (ASCII only, case-sensitive)
 //   --auto-select-screen-capture-source                  picks any screen, whatever its (translated) name
-//   --system-audio-capture-default_checked               ticks "share system audio" (the picker never does it by itself)
+//   --system-audio-capture-default_checked               ticks "share system audio" (the picker never does it by itself); left out when the page
+//                                                        gets the emulator's own audio instead (audio-capture.js), which is the usual case
+//   --autoplay-policy=no-user-gesture-required           lets the page's AudioContext (the emulator's audio) run with nobody clicking
 // getDisplayMedia needs no user gesture and shows no picker when one of the first two matches; with no match the picker
 // stays open (and the request pending), which is why the window is looked up first and the screen is the fallback.
 'use strict';
@@ -29,13 +31,15 @@ function asciiTitle(title) {
 // capture: { title } captures that window, anything else the screen. headless (the default): --headless=new has no window, no taskbar
 // entry and no "is sharing" bar, and still honours the auto-select flags (checked on Chrome 155 and Edge 156: a window by title,
 // system audio, WebRTC and the data channel all work). Without it the window sits off screen: it only has to exist.
-function browserArgs({ profile, url, capture, headless = true }) {
+// processAudio: the page brings the emulator's audio by itself, so the system-audio switch stays off.
+function browserArgs({ profile, url, capture, headless = true, processAudio = false }) {
   return [
     ...(headless ? ['--headless=new'] : []),
     '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', '--disable-sync',
     ...(headless ? [] : ['--window-position=-32000,-32000', '--window-size=480,320']),
     capture && capture.title ? '--auto-select-window-capture-source-by-title=' + capture.title : '--auto-select-screen-capture-source',
-    '--system-audio-capture-default_checked',
+    ...(processAudio ? [] : ['--system-audio-capture-default_checked']),
+    '--autoplay-policy=no-user-gesture-required',
     // Off screen counts as hidden: without these the page's timers drop to one a second.
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion',
     '--app=' + url
@@ -61,7 +65,7 @@ const system = {
 };
 
 // One emulator + one stream window at a time. o: { browser: { exe, name } | null, profile, port(), isConnected(), onFocus?(pid), log?(text) } plus
-// any of the `system` helpers and `timing` ({ poll, windowWait, connectWait, watch }) to replace.
+// processAudio?() (resolves true when the page will get the emulator's own audio, so the system-audio switch is left out), any of the `system` helpers and `timing` ({ poll, windowWait, connectWait, watch }) to replace.
 // Nothing in here may throw into the server: every async path catches, and a failure only turns the state into "cut".
 function createStreamer(o) {
   const sys = { ...system, ...o };
@@ -86,10 +90,14 @@ function createStreamer(o) {
   async function open(id, capture) {
     if (!live(id)) return;
     cur.capture = capture; cur.state = 'starting'; cur.openedAt = Date.now();
+    // The emulator's own audio is ready (or failed, and then the system audio is used): decided before the window opens.
+    const processAudio = o.processAudio ? await Promise.resolve(o.processAudio()).catch(() => false) === true : false;
+    if (!live(id)) return;
+    note('stream: audio ' + (processAudio ? 'solo del emulador (captura por proceso)' : 'de todo el sistema'));
     const url = 'http://localhost:' + sys.port() + '/stream.html?auto=1&name=' + encodeURIComponent(cur.name) + '&from=' + encodeURIComponent(cur.system);
     const rec = { child: null, pid: null, exited: false };
     try {
-      const child = rec.child = sys.spawn(o.browser.exe, browserArgs({ profile: o.profile, url, capture, headless: o.headless !== false }), { detached: true, stdio: 'ignore' });
+      const child = rec.child = sys.spawn(o.browser.exe, browserArgs({ profile: o.profile, url, capture, headless: o.headless !== false, processAudio }), { detached: true, stdio: 'ignore' });
       child.on('error', e => { note('stream: el navegador no arrancó: ' + e.message); if (live(id) && cur.browser === rec) { cur.browser = null; cur.state = 'cut'; } });
       child.on('exit', () => { rec.exited = true; });
       if (child.unref) child.unref();
