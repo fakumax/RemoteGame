@@ -73,6 +73,15 @@ body.touch #touch{display:grid}
   body.touch #shoulders{position:fixed;top:10px;left:18px;right:18px}
   body.touch #dpad,body.touch #face button,body.touch #mid button,body.touch #shoulders button{opacity:.55}
 }
+/* Phones and tablets: a short column under the pad. The network fixes itself (no Reconectar), the keyboard help does not apply,
+   and the pad line shows up only when the browser sees a pad. */
+body.touch #head,body.touch #reconnect,body.touch #scan,body.touch #side details{display:none}
+body.touch #pad:not(.seen){display:none}
+body.touch #side{gap:6px;padding-top:2px}
+body.touch .you{font-size:20px;padding:6px 10px;border-radius:10px}
+body.touch .you small{display:inline;margin:0 0 0 8px}
+/* A streamed emulator (Switch, MAME) is shown as it comes: no CRT filter to pick. */
+body.native .pick{display:none}
 </style>
 <script src="/webrtc.js"></script>
 <script src="/diag.js"></script>
@@ -221,6 +230,7 @@ body.touch #touch{display:grid}
     if(text!==padLine){padLine=text;$('pad').textContent=text;$('pad').title=Array.from(pads).filter(Boolean).map(g=>g.id).join('\n');}
     // A pad the browser does not show yet: say what makes it appear (the browser hides it until a button is pressed, no reload needed).
     const seen=Array.from(pads).some(g=>g&&g.connected);
+    $('pad').classList.toggle('seen',seen||live.length>0);
     $('padhint').textContent=!live.length&&(seen||Date.now()<scanUntil)?'Apretá y soltá un botón del mando con esta pestaña al frente. Si sigue sin verse, apagalo y prendelo de nuevo: no hace falta recargar.':'';
     // The host's "who is who" learns which pad this browser sees.
     const name=live.length?RemotePads.padName(live[0].id):'';
@@ -424,6 +434,7 @@ body.touch #touch{display:grid}
         // the capture's own proportion and its own CRT pick, off at first); N64 is analog by core.
         native=!!m.game.analog;analog=native||m.game.core==='n64';
         $('title').textContent=m.game.name||m.game.rom;labelButtons(m.game.core,native);crt.setCore(m.game.core);fit();
+        if(native&&$('crt').value!=='off'){$('crt').value='off';$('crt').onchange();}   // its pick is hidden: an old choice must not stay on
         setStatus('Cargando '+(m.game.name||m.game.rom)+'…');startRtc();
       } else if(m.t==='host-left'){hasGame=false;stopRtc();setStatus('El anfitrión está cambiando de juego…');}
       else if(m.t==='signal'){rtc&&rtc.handleSignal(m.data);}
