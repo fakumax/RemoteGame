@@ -1509,18 +1509,25 @@ function fail(message) {
 function spawnTunnelProcess(exe) {
   const child = spawnTunnel(exe, ['tunnel', '--url', 'http://localhost:' + (server.address()?.port || PORT), '--no-autoupdate'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true });
   tun.proc = child;
+  const recent = [];   // its last lines: what it said before dying with no link
+  let dns = null;      // set when the name lookup is what fails: that reason wins over any later ERR line
   const onLine = line => {
     if (child !== tun.proc) return;
-    const link = line.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (line.trim()) { recent.push(line); if (recent.length > 8) recent.shift(); }
+    const failing = /\s(?:ERR|FTL)\s/.test(line);
+    // Never an error line (it quotes https://api.trycloudflare.com/tunnel) and never the API itself: that is not a link.
+    const link = failing ? null : line.match(/https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/);
     if (link && tun.state === 'starting') {
       Object.assign(tun, { state: 'on', error: null, msg: null });
       game.publicUrl = link[0];
       console.log('\n  Link para tu amigo:  ' + link[0] + '\n  (cambia cada vez que se prende el túnel)\n');
-    } else if (tun.state === 'starting' && /\sERR\s/.test(line)) {
+    } else if (tun.state === 'starting' && failing) {
       // e.g. `... ERR Couldn't start tunnel error="unknown protocol ..."`: keep the reason, not the timestamp.
-      const text = line.replace(/^.*?\sERR\s+/, '');
+      const text = line.replace(/^.*?\s(?:ERR|FTL)\s+/, '');
       log.write('tunnel', text);
-      tun.error = ((text.match(/error="([^"]*)"/) || [])[1] || text).slice(0, 200);
+      const host = (text.match(/lookup ([^\s:]+).*no such host/) || [])[1];
+      if (host) dns = 'tu DNS no resuelve ' + host + ' (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC';
+      tun.error = dns || ((text.match(/error="([^"]*)"/) || [])[1] || text).slice(0, 200);
     }
   };
   // cloudflared logs to stderr; stdout is read too so that no pipe is left to fill up.
@@ -1531,7 +1538,15 @@ function spawnTunnelProcess(exe) {
   }
   // Not started (not installed, blocked) is reported like a dead one. Clearing tun.proc turns a later exit into a no-op.
   child.on('error', err => { if (child === tun.proc) fail('no pude arrancar cloudflared: ' + err.message); });
-  child.on('exit', (code, signal) => { if (child === tun.proc) fail(tun.error || 'cloudflared se cerró (código ' + (code ?? signal) + ')'); });
+  child.on('exit', (code, signal) => {
+    if (child !== tun.proc) return;
+    const closed = 'cloudflared se cerró (código ' + (code ?? signal) + ')';
+    if (tun.state !== 'starting') return fail(tun.error || closed);
+    // It died before giving a link: keep what it said, and show its last line when no ERR line explained it.
+    log.write('tunnel', closed + '; últimas líneas: ' + recent.join(' | '));
+    const last = (recent[recent.length - 1] || '').replace(/^\S+Z\s+(?:[A-Z]{3}\s+)?/, '').trim();
+    fail(tun.error || (last ? closed + ': ' + last.slice(0, 160) : closed));
+  });
   if (!hooked) {
     hooked = true;
     // Ctrl+C, closing the console (SIGHUP) or quitting must not leave cloudflared running.

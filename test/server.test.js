@@ -712,6 +712,45 @@ tunnelTest('Tunnel: a cloudflared that dies leaves an error and no link; an ERR 
     assert.deepEqual(g.tunnel.stop(),OFF);
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+// The line cloudflared prints when the DNS does not know trycloudflare.com (a router that blocks it). It quotes
+// https://api.trycloudflare.com: that is not a link, and the reason has to reach the page.
+tunnelTest('Tunnel: an error line that names api.trycloudflare.com is not a link; a DNS that blocks it says so',async()=>{
+  const root=tunnelRoot();cachedTunnel(root);
+  const spawned=[];const logged=[];
+  const log={write:(kind,text)=>logged.push(kind+': '+text),error:()=>{}};
+  const {g}=await instance({ log,spawnTunnel:()=>{const c=fakeCloudflared();spawned.push(c);return c;},settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
+  try{
+    g.tunnel.start();
+    await waitFor(()=>spawned.length===1);
+    spawned[0].stderr.write(cfLine('INF Requesting new quick Tunnel on trycloudflare.com...'));
+    spawned[0].stderr.write(cfLine('ERR failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: lookup api.trycloudflare.com: no such host'));
+    spawned[0].stderr.write(cfLine('ERR Error unmarshaling QuickTunnel response'));   // a later, vaguer line does not hide the cause
+    await waitFor(()=>logged.length===2);
+    assert.equal(g.tunnel.state().state,'starting');
+    assert.equal(g.tunnel.state().url,null);
+    spawned[0].emit('exit',1);
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'tu DNS no resuelve api.trycloudflare.com (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC',msg:null,provider:'cloudflared'});
+    assert.match(logged.at(-1),/^tunnel: cloudflared se cerró \(código 1\); últimas líneas: .*no such host/);
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+tunnelTest('Tunnel: dying before the link with no ERR line shows the last thing it said, and the log keeps it',async()=>{
+  const root=tunnelRoot();cachedTunnel(root);
+  const spawned=[];const logged=[];
+  const log={write:(kind,text)=>logged.push(kind+': '+text),error:()=>{}};
+  const {g}=await instance({ log,spawnTunnel:()=>{const c=fakeCloudflared();spawned.push(c);return c;},settingsFile:path.join(root,'settings.json'),tunnelBinDir:path.join(root,'bin') });
+  try{
+    g.tunnel.start();
+    await waitFor(()=>spawned.length===1);
+    spawned[0].stderr.write(cfLine('INF Requesting new quick Tunnel on trycloudflare.com...'));
+    spawned[0].stderr.write(cfLine('WRN certificate has expired'));
+    await new Promise(r=>setTimeout(r,50));   // the lines reach the reader
+    assert.equal(g.tunnel.state().state,'starting');
+    spawned[0].emit('exit',1);
+    assert.equal(g.tunnel.state().error,'cloudflared se cerró (código 1): certificate has expired');
+    assert.match(logged.at(-1),/^tunnel: cloudflared se cerró \(código 1\); últimas líneas: .*Requesting new quick Tunnel.* \| .*certificate has expired$/);
+    assert.deepEqual(g.tunnel.stop(),OFF);
+  }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
+});
 tunnelTest('Tunnel: the first start downloads cloudflared once into cache/bin, checks it and reuses it',async()=>{
   const root=tunnelRoot();const exe=path.join(root,'bin','cloudflared.exe');
   const downloads=[];const spawned=[];
