@@ -1517,6 +1517,9 @@ function spawnTunnelProcess(exe) {
     const failing = /\s(?:ERR|FTL)\s/.test(line);
     // Never an error line (it quotes https://api.trycloudflare.com/tunnel) and never the API itself: that is not a link.
     const link = failing ? null : line.match(/https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/);
+    // Its last words come with no level at all: `failed to request quick Tunnel: ... lookup <host>: no such host`.
+    const host = tun.state === 'starting' && (line.match(/lookup ([^\s:]+).*no such host/) || [])[1];
+    if (host) tun.error = dns = 'tu DNS no resuelve ' + host + ' (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC';
     if (link && tun.state === 'starting') {
       Object.assign(tun, { state: 'on', error: null, msg: null });
       game.publicUrl = link[0];
@@ -1525,8 +1528,6 @@ function spawnTunnelProcess(exe) {
       // e.g. `... ERR Couldn't start tunnel error="unknown protocol ..."`: keep the reason, not the timestamp.
       const text = line.replace(/^.*?\s(?:ERR|FTL)\s+/, '');
       log.write('tunnel', text);
-      const host = (text.match(/lookup ([^\s:]+).*no such host/) || [])[1];
-      if (host) dns = 'tu DNS no resuelve ' + host + ' (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC';
       tun.error = dns || ((text.match(/error="([^"]*)"/) || [])[1] || text).slice(0, 200);
     }
   };

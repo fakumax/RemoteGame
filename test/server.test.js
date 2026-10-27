@@ -731,6 +731,14 @@ tunnelTest('Tunnel: an error line that names api.trycloudflare.com is not a link
     spawned[0].emit('exit',1);
     assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'tu DNS no resuelve api.trycloudflare.com (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC',msg:null,provider:'cloudflared'});
     assert.match(logged.at(-1),/^tunnel: cloudflared se cerró \(código 1\); últimas líneas: .*no such host/);
+    // What cloudflared 2026.10.3 really does: its last line, with no level, carries the lookup.
+    g.tunnel.start();
+    await waitFor(()=>spawned.length===2);
+    spawned[1].stderr.write('failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: lookup api.trycloudflare.com: no such host\n');
+    await waitFor(()=>g.tunnel.state().error);
+    assert.equal(g.tunnel.state().url,null);
+    spawned[1].emit('exit',1);
+    assert.equal(g.tunnel.state().error,'tu DNS no resuelve api.trycloudflare.com (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC');
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 tunnelTest('Tunnel: dying before the link with no ERR line shows the last thing it said, and the log keeps it',async()=>{
