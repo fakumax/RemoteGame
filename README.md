@@ -10,19 +10,19 @@ Si clonaste el repositorio, son tres pasos. Hace falta Node.js 22.13 o posterior
 
 ```powershell
 pnpm install
-pnpm start         # biblioteca + sala online con link por Internet (Cloudflare)
+pnpm start         # biblioteca + sala online con link por Internet (ngrok)
 pnpm local         # sin túnel: solo esta PC y tu red de casa
 ```
 
 1. `pnpm install`.
-2. `pnpm local` (o `pnpm start`, que además abre el túnel de Cloudflare, sin cuenta) y abrí http://localhost:3000.
+2. `pnpm local` (o `pnpm start`, que además necesita ngrok instalado con su authtoken: `winget install ngrok.ngrok` y `ngrok config add-authtoken <tu token>`) y abrí http://localhost:3000.
 3. La primera vez la página pregunta **¿Dónde están tus juegos?**: tocá **Buscar carpeta…** (en Windows abre el selector de carpetas), elegí la carpeta que contiene las de cada consola, revisá lo que encontró y tocá **Guardar**. Después se cambia con el botón ⚙️ junto al buscador.
 
 LaunchBox **no hace falta**. Si lo tenés instalado, se aprovecha como extra (títulos, más portadas y los nombres de arcade de `MAME.xml`).
 
 **Acceso directo en el escritorio:** apunta a `node.exe` con `server.js --open`, carpeta de inicio la del proyecto, e ícono `assets/remotegame.ico`. Con doble clic se abre la ventana del servidor y la biblioteca en el navegador. Si ya estaba abierto con el mismo código, solo abre el navegador (no corta una partida en curso); si estaba abierto con **otra versión** (después de actualizar el programa), le pide que se cierre y toma su lugar. Una versión muy vieja, que no entiende ese pedido, se cierra a mano: la consola lo avisa. Cerrar la ventana apaga el servidor y el túnel. No se empaqueta como `.exe`: Smart App Control de Windows bloquea ejecutables sin firma, mientras que `node.exe` está firmado por OpenJS Foundation.
 
-Al arrancar, la consola muestra el **link para tu amigo** (es un `trycloudflare.com` que cambia en cada arranque: pasáselo de nuevo cada vez) y la dirección de tu red. Abrí http://localhost:3000 en tu PC.
+Al arrancar, la consola muestra el **link para tu amigo** (con ngrok gratis es siempre el mismo dominio: pasáselo una sola vez) y la dirección de tu red. Abrí http://localhost:3000 en tu PC.
 
 `PORT` cambia el puerto.
 
@@ -64,22 +64,9 @@ Hay **una sola sala, permanente, para hasta 3 amigos** (P2, P3 y P4; vos sos P1)
 
 ### Conexión
 
-- **Internet:** el túnel es Cloudflare Quick Tunnel (`cloudflared`): gratis, sin cuenta y sin página de aviso, así que tu amigo entra directo con el link. El link (`https://…trycloudflare.com`) es al azar y cambia en cada arranque. Por el túnel pasan solo las páginas y la señalización; video y controles van directo entre navegadores. La primera vez RemoteGame baja `cloudflared` una sola vez a `cache\bin` (si ya lo tenés en el PATH, usa ese). El interruptor **🌐 Amigos por Internet** de la biblioteca (y de la pantalla de juego) prende y apaga el túnel sin reiniciar; solo lo ve esta PC y su elección queda en `settings.json`. `pnpm local` y `--no-share` arrancan con el túnel apagado sin cambiar esa elección.
+- **Internet:** el túnel es ngrok, con su plan gratis: un link fijo (`https://….ngrok-free.app`) y una sola sesión a la vez (si ngrok ya está abierto en otra ventana, la biblioteca lo avisa). Por el túnel pasan solo las páginas y la señalización; video y controles van directo entre navegadores. ngrok gratis muestra una advertencia la primera vez: tu amigo toca *Visit Site*. Se usa ngrok y no el Quick Tunnel de Cloudflare porque algunos proveedores de Internet bloquean `trycloudflare.com` en su DNS (el link no abre ni en tu Wi-Fi ni en el celu con datos). El interruptor **🌐 Amigos por Internet** de la biblioteca (y de la pantalla de juego) prende y apaga el túnel sin reiniciar; solo lo ve esta PC y su elección queda en `settings.json`. `pnpm local` y `--no-share` arrancan con el túnel apagado sin cambiar esa elección.
 - **Misma red:** `http://<IP-de-esta-PC>:3000`. Windows tiene que permitir conexiones entrantes a Node: con la red marcada como *Pública* (y la regla de bloqueo que crea Windows) los otros dispositivos no conectan. Marcá la red como *Privada* y permití el puerto 3000 en ese perfil.
 - **CGNAT:** si alguna de las dos conexiones no permite conexión directa, WebRTC necesita un relay TURN: `TURN_URLS` (separadas por coma), `TURN_USERNAME` y `TURN_CREDENTIAL`. Sin TURN, tu amigo ve un aviso a los 15 segundos.
-
-#### Internet bloqueado por DNS
-
-Si la biblioteca dice **No se pudo abrir el túnel: es el DNS**, el DNS de tu router o de tu proveedor de Internet bloquea `trycloudflare.com`: responde que no existe, aunque 1.1.1.1 y 8.8.8.8 lo encuentran. Reiniciar el modem no alcanza cuando el bloqueo es del proveedor. El arreglo es mandar a 1.1.1.1 solo las consultas de ese dominio (el resto de tu DNS queda igual). En PowerShell **como administrador**:
-
-```powershell
-Add-DnsClientNrptRule -Namespace ".trycloudflare.com" -NameServers "1.1.1.1","8.8.8.8"
-Clear-DnsClientCache
-```
-
-Después apagá y prendé el interruptor 🌐 Internet. Para deshacerlo: `Get-DnsClientNrptRule | Where-Object Namespace -eq '.trycloudflare.com' | Remove-DnsClientNrptRule -Force`.
-
-Si tu amigo tiene el mismo proveedor, a él tampoco le abre el link: en el celular, Ajustes → DNS privado → `one.one.one.one`; en una PC, la misma regla de arriba.
 
 `public/play.html` conserva el modo NES por lockstep (cada navegador emula y solo viajan los botones), ya no enlazado desde la biblioteca.
 

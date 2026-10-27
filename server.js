@@ -15,8 +15,6 @@ const { createStreamer, findBrowser, system: sysProc } = require('./stream-brows
 const { createAudioCapture, createAudioRelay } = require('./audio-capture');
 const { createLog, installCrashGuard } = require('./crash-log');
 const { execFile } = require('child_process');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
 
 let cfg = { port: 3000 };
 try {
@@ -52,28 +50,6 @@ function groupSwitch(files) {
     const updates = info.filter(x => x.kind === 'update' && mine(b, x)).sort((p, q) => q.version - p.version).map(x => ({ file: x.file, version: x.version }));
     return { file: b.file, full: b.full, updates, dlc: info.filter(x => x.kind === 'dlc' && mine(b, x)).length };
   });
-}
-
-// cloudflared, the tunnel's program: the official Windows release, downloaded only when it is neither on the PATH nor in cache/bin.
-const TUNNEL_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
-const TUNNEL_EXE = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
-// Streams url into file; the signal cancels it.
-async function downloadFile(url, file, signal) {
-  const res = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(180000)]) });
-  if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(file));
-}
-// Only a Windows program that runs goes into cache/bin: a cut-short download or an error page does not.
-async function checkTunnelProgram(file) {
-  const { size } = await fs.promises.stat(file);
-  const head = Buffer.alloc(2), handle = await fs.promises.open(file, 'r');
-  try { await handle.read(head, 0, 2, 0); } finally { await handle.close(); }
-  if (head.toString() !== 'MZ' || size < 5e6 || size > 200e6) throw new Error('el archivo bajado no es cloudflared');
-  const ran = await new Promise(resolve => {
-    try { execFile(file, ['--version'], { timeout: 20000, windowsHide: true }, err => resolve(!err)); }
-    catch (e) { resolve(false); }   // a file Windows cannot run at all throws right here
-  });
-  if (!ran) throw new Error('cloudflared no arranca en esta PC (¿lo bloquea un antivirus?)');
 }
 
 const defaultLog = createLog(path.join(__dirname, 'cache', 'remotegame.log'));
@@ -1474,108 +1450,66 @@ app.post('/api/tunnel', ownerOnly('tunnel'), (req, res) => {
   catch (e) { return res.status(500).json({ ok: false, msg: 'No pude guardar los ajustes.' }); }
   res.json({ ok: true, tunnel: on ? tunnel.start() : tunnel.stop() });
 });
-// The tunnel (Cloudflare Quick Tunnel, cloudflared): guests outside the home network reach this server through it.
-// Only pages and signaling go through it; video and controls travel over WebRTC. One tunnel at a time. No account and
-// no warning page; the link is random and changes on every start.
-const tun = { state: 'off', error: null, msg: null, proc: null, run: null, help: null };
-const TUNNEL_BIN = path.resolve(options.tunnelBinDir || path.join(__dirname, 'cache', 'bin'));
+// The ngrok tunnel: guests outside the home network reach this server through it. Only pages and signaling go
+// through it; video and controls travel over WebRTC. The free plan gives one fixed link (*.ngrok-free.app) and one
+// session at a time; guests see ngrok's warning page once and tap "Visit Site".
+const tun = { state: 'off', error: null, proc: null };
 const spawnTunnel = options.spawnTunnel || require('child_process').spawn;
-const downloadTunnel = options.downloadTunnel || downloadFile;
 let hooked = false;
-// The program to run: cloudflared on the PATH, else the copy in cache/bin, else a one-time download.
-// Resolves to null when the start was stopped meanwhile.
-async function tunnelProgram(run) {
-  const onPath = (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, TUNNEL_EXE)).find(f => fs.existsSync(f));
-  if (onPath) return onPath;
-  const cached = path.join(TUNNEL_BIN, TUNNEL_EXE), part = cached + '.part';
-  if (fs.existsSync(cached)) return cached;
-  tun.msg = 'Preparando el túnel (primera vez)…';
-  fs.mkdirSync(TUNNEL_BIN, { recursive: true });
-  try { await downloadTunnel(TUNNEL_URL, part, run.abort.signal); }
-  catch (e) {
-    fs.rmSync(part, { force: true });
-    if (run.abort.signal.aborted) return null;
-    throw new Error('no pude bajar cloudflared; revisá la conexión a Internet');
-  }
-  try { await checkTunnelProgram(part); fs.renameSync(part, cached); }
-  catch (e) { fs.rmSync(part, { force: true }); throw e; }
-  return cached;
-}
-// The tunnel is down for a reason: no link, and it can be started again.
-function fail(message) {
-  Object.assign(tun, { state: 'error', error: message, msg: null, proc: null, run: null });
-  game.publicUrl = null;
-}
-function spawnTunnelProcess(exe) {
-  const child = spawnTunnel(exe, ['tunnel', '--url', 'http://localhost:' + (server.address()?.port || PORT), '--no-autoupdate'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true });
-  tun.proc = child;
-  const recent = [];   // its last lines: what it said before dying with no link
-  let dns = null;      // set when the name lookup is what fails: that reason wins over any later ERR line
-  const onLine = line => {
-    if (child !== tun.proc) return;
-    if (line.trim()) { recent.push(line); if (recent.length > 8) recent.shift(); }
-    const failing = /\s(?:ERR|FTL)\s/.test(line);
-    // Never an error line (it quotes https://api.trycloudflare.com/tunnel) and never the API itself: that is not a link.
-    const link = failing ? null : line.match(/https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/);
-    // Its last words come with no level at all: `failed to request quick Tunnel: ... lookup <host>: no such host`.
-    const host = tun.state === 'starting' && (line.match(/lookup ([^\s:]+).*no such host/) || [])[1];
-    // help: the README section with the fix, for the page's "Ver cómo" link.
-    if (host) { tun.error = dns = 'es el DNS (tu router o tu proveedor de Internet bloquea ' + host + ')'; tun.help = 'internet-bloqueado-por-dns'; }
-    if (link && tun.state === 'starting') {
-      Object.assign(tun, { state: 'on', error: null, msg: null });
-      game.publicUrl = link[0];
-      console.log('\n  Link para tu amigo:  ' + link[0] + '\n  (cambia cada vez que se prende el túnel)\n');
-    } else if (tun.state === 'starting' && failing) {
-      // e.g. `... ERR Couldn't start tunnel error="unknown protocol ..."`: keep the reason, not the timestamp.
-      const text = line.replace(/^.*?\s(?:ERR|FTL)\s+/, '');
-      log.write('tunnel', text);
-      tun.error = dns || ((text.match(/error="([^"]*)"/) || [])[1] || text).slice(0, 200);
-    }
-  };
-  // cloudflared logs to stderr; stdout is read too so that no pipe is left to fill up.
-  for (const stream of [child.stdout, child.stderr]) {
-    let buffer = '';
-    stream.setEncoding('utf8');
-    stream.on('data', chunk => { buffer += chunk; const lines = buffer.split(/\r?\n/); buffer = lines.pop(); lines.forEach(onLine); });
-  }
-  // Not started (not installed, blocked) is reported like a dead one. Clearing tun.proc turns a later exit into a no-op.
-  child.on('error', err => { if (child === tun.proc) fail('no pude arrancar cloudflared: ' + err.message); });
-  child.on('exit', (code, signal) => {
-    if (child !== tun.proc) return;
-    const closed = 'cloudflared se cerró (código ' + (code ?? signal) + ')';
-    if (tun.state !== 'starting') return fail(tun.error || closed);
-    // It died before giving a link: keep what it said, and show its last line when no ERR line explained it.
-    log.write('tunnel', closed + '; últimas líneas: ' + recent.join(' | '));
-    const last = (recent[recent.length - 1] || '').replace(/^\S+Z\s+(?:[A-Z]{3}\s+)?/, '').trim();
-    fail(tun.error || (last ? closed + ': ' + last.slice(0, 160) : closed));
-  });
-  if (!hooked) {
-    hooked = true;
-    // Ctrl+C, closing the console (SIGHUP) or quitting must not leave cloudflared running.
-    process.on('exit', () => tunnel.stop());
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { tunnel.stop(); process.exit(0); });
-  }
-}
 const tunnel = {
-  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error, msg: tun.msg, provider: 'cloudflared', ...(tun.help && { help: tun.help }) }),
+  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error, provider: 'ngrok' }),
   // Only a saved "off" keeps it down: a new install starts with the tunnel on.
   wanted: () => readSettings().share !== false,
   start() {
-    if (tun.run) return tunnel.state();   // one tunnel at a time: already starting or up
-    const run = { abort: new AbortController() };
-    Object.assign(tun, { run, state: 'starting', error: null, msg: null, proc: null, help: null });
+    if (tun.proc) return tunnel.state();   // one tunnel at a time: already starting or up
+    const child = spawnTunnel('ngrok', ['http', String(server.address()?.port || PORT), '--log', 'stdout', '--log-format', 'json'], { stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true });
+    Object.assign(tun, { state: 'starting', error: null, proc: child });
     game.publicUrl = null;
-    tunnelProgram(run).then(exe => {
-      if (exe && tun.run === run) { tun.msg = null; spawnTunnelProcess(exe); }
-    }).catch(err => { if (tun.run === run) fail(err.message); });
+    // Errors count only while starting: a tunnel that is up keeps running through ngrok's own reconnects.
+    const note = text => {
+      log.write('tunnel', text);
+      if (tun.state !== 'starting') return;
+      tun.error = /authtoken|authentication failed|ERR_NGROK_4018/i.test(text) ? 'Falta configurar el authtoken de ngrok'
+        : /ERR_NGROK_108|ERR_NGROK_334/.test(text) ? 'ngrok ya está abierto en otro lado (el plan gratis permite uno a la vez): cerralo y volvé a prender el interruptor'
+        : text.split('\n')[0].slice(0, 200);
+    };
+    const onLine = line => {
+      let entry; try { entry = JSON.parse(line); } catch { return; }
+      if (child !== tun.proc) return;
+      if (entry.url && /^https:/.test(entry.url) && tun.state === 'starting') {
+        tun.state = 'on';
+        game.publicUrl = entry.url;
+        console.log('\n  Link para tu amigo:  ' + entry.url + '\n  (es siempre el mismo; pasáselo una sola vez)\n');
+      } else if (entry.lvl === 'eror' || entry.lvl === 'crit' || (entry.err && entry.err !== '<nil>')) note(String(entry.err && entry.err !== '<nil>' ? entry.err : entry.msg));
+    };
+    let buffer = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => { buffer += chunk; const lines = buffer.split(/\r?\n/); buffer = lines.pop(); lines.forEach(onLine); });
+    child.stderr.on('data', chunk => { if (child === tun.proc) note(String(chunk).trim()); });
+    // ENOENT: ngrok is not on the PATH. Clearing tun.proc turns the exit that may follow into a no-op.
+    child.on('error', err => {
+      if (child !== tun.proc) return;
+      Object.assign(tun, { state: 'error', error: err.code === 'ENOENT' ? 'ngrok no está instalado (winget install ngrok.ngrok)' : err.message, proc: null });
+      game.publicUrl = null;
+    });
+    child.on('exit', (code, signal) => {
+      if (child !== tun.proc) return;   // stopped on purpose, or already reported
+      Object.assign(tun, { state: 'error', error: tun.error || 'ngrok se cerró (código ' + (code ?? signal) + ')', proc: null });
+      game.publicUrl = null;
+    });
+    if (!hooked) {
+      hooked = true;
+      // Ctrl+C, closing the console (SIGHUP) or quitting must not leave ngrok running.
+      process.on('exit', () => tunnel.stop());
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { tunnel.stop(); process.exit(0); });
+    }
     return tunnel.state();
   },
   stop() {
-    const { run, proc } = tun;
-    Object.assign(tun, { state: 'off', error: null, msg: null, proc: null, run: null, help: null });
+    const child = tun.proc;
+    Object.assign(tun, { state: 'off', error: null, proc: null });
     game.publicUrl = null;
-    if (run) run.abort.abort();   // a download still running is cancelled
-    if (proc) try { proc.kill(); } catch {}
+    if (child) try { child.kill(); } catch {}
     return tunnel.state();
   }
 };
@@ -1619,7 +1553,7 @@ if (require.main === module) {
   const open = process.argv.includes('--open');
   if (open) process.title = 'RemoteGame';
   const show = () => { if (open) openBrowser('http://localhost:' + port); setTimeout(() => process.exit(0), 3000); };
-  let deadline = 0;
+  let deadline = 0, replaced = false;
   const listen = () => game.server.listen(port);
   // The stream window is ours: it never outlives RemoteGame (Ctrl+C, closing the console, quitting).
   process.on('exit', () => game.killStream());
@@ -1642,7 +1576,7 @@ if (require.main === module) {
       console.log('Hay una versión vieja de RemoteGame abierta: cerrá su ventana y volvé a abrir el acceso directo.');
       return show();
     }
-    deadline = Date.now() + 10000;
+    replaced = true; deadline = Date.now() + 10000;
     setTimeout(listen, 300);
   });
   game.server.once('listening', () => {
@@ -1650,8 +1584,8 @@ if (require.main === module) {
     defaultLog.write('server', 'arrancó en el puerto ' + port + ' (pid ' + process.pid + ', node ' + process.version + ')');
     for (const ip of game.lanUrls()) console.log('Misma red:  ' + ip);
     // --no-share and SHARE=0 start it off for this run only; otherwise the saved switch (settings.json) decides.
-    // A replaced instance takes its cloudflared down with it: its exit handler stops the tunnel.
-    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0' && game.tunnel.wanted()) game.tunnel.start();
+    // After a replacement, give ngrok a moment to notice the old tunnel is gone (the free plan allows one).
+    if (!process.argv.includes('--no-share') && process.env.SHARE !== '0' && game.tunnel.wanted()) setTimeout(() => game.tunnel.start(), replaced ? 2500 : 0);
     if (open) openBrowser('http://localhost:' + port);
     if (open) console.log('Cerrá esta ventana para apagar RemoteGame.');
   });

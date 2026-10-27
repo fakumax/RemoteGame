@@ -1,6 +1,5 @@
 // RemoteGame: the permanent invite banner (link for the friend + whether they are in).
 (function(root) {
-  const README = 'https://github.com/fakumax/RemoteGame#';
   function row(label, url, note) {
     const div = document.createElement('div');
     div.className = 'row';
@@ -78,17 +77,7 @@
     function paint() {
       tog.setAttribute('aria-checked', String(tunnel.state === 'on' || tunnel.state === 'starting'));
       tog.title = tunnel.state === 'starting' && tunnel.msg ? tunnel.msg : { off: 'Prendelo para que se pueda entrar desde Internet', starting: 'Abriendo túnel…', on: 'Encendido: se puede entrar desde Internet', error: 'No se pudo abrir el túnel' }[tunnel.state] || '';
-      const text = tunnel.state === 'starting' ? (tunnel.msg || 'Abriendo túnel…') : tunnel.state === 'error' ? 'No se pudo abrir el túnel' + (tunnel.error ? ': ' + tunnel.error : '') : '';
-      const help = tunnel.state === 'error' && tunnel.help || '';
-      if (st.dataset.k !== text + '#' + help) {   // redrawn only on change, so its link can be clicked
-        st.dataset.k = text + '#' + help;
-        st.textContent = text;
-        // A known cause (a DNS that blocks the tunnel) links to its fix in the README.
-        if (help) {
-          const a = document.createElement('a'); a.href = README + help; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Ver cómo arreglarlo';
-          st.append('. ', a, '.');
-        }
-      }
+      st.textContent = tunnel.state === 'starting' ? (tunnel.msg || 'Abriendo túnel…') : tunnel.state === 'error' ? 'No se pudo abrir el túnel' + (tunnel.error ? ': ' + tunnel.error : '') : '';
       st.classList.toggle('warn', tunnel.state === 'error');
     }
     // Only this PC gets the switch: a guest's page is answered with 403. null means not known yet.
