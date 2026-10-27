@@ -1477,7 +1477,7 @@ app.post('/api/tunnel', ownerOnly('tunnel'), (req, res) => {
 // The tunnel (Cloudflare Quick Tunnel, cloudflared): guests outside the home network reach this server through it.
 // Only pages and signaling go through it; video and controls travel over WebRTC. One tunnel at a time. No account and
 // no warning page; the link is random and changes on every start.
-const tun = { state: 'off', error: null, msg: null, proc: null, run: null };
+const tun = { state: 'off', error: null, msg: null, proc: null, run: null, help: null };
 const TUNNEL_BIN = path.resolve(options.tunnelBinDir || path.join(__dirname, 'cache', 'bin'));
 const spawnTunnel = options.spawnTunnel || require('child_process').spawn;
 const downloadTunnel = options.downloadTunnel || downloadFile;
@@ -1519,7 +1519,8 @@ function spawnTunnelProcess(exe) {
     const link = failing ? null : line.match(/https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/);
     // Its last words come with no level at all: `failed to request quick Tunnel: ... lookup <host>: no such host`.
     const host = tun.state === 'starting' && (line.match(/lookup ([^\s:]+).*no such host/) || [])[1];
-    if (host) tun.error = dns = 'tu DNS no resuelve ' + host + ' (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC';
+    // help: the README section with the fix, for the page's "Ver cómo" link.
+    if (host) { tun.error = dns = 'es el DNS (tu router o tu proveedor de Internet bloquea ' + host + ')'; tun.help = 'internet-bloqueado-por-dns'; }
     if (link && tun.state === 'starting') {
       Object.assign(tun, { state: 'on', error: null, msg: null });
       game.publicUrl = link[0];
@@ -1556,13 +1557,13 @@ function spawnTunnelProcess(exe) {
   }
 }
 const tunnel = {
-  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error, msg: tun.msg, provider: 'cloudflared' }),
+  state: () => ({ state: tun.state, url: game.publicUrl, error: tun.error, msg: tun.msg, provider: 'cloudflared', ...(tun.help && { help: tun.help }) }),
   // Only a saved "off" keeps it down: a new install starts with the tunnel on.
   wanted: () => readSettings().share !== false,
   start() {
     if (tun.run) return tunnel.state();   // one tunnel at a time: already starting or up
     const run = { abort: new AbortController() };
-    Object.assign(tun, { run, state: 'starting', error: null, msg: null, proc: null });
+    Object.assign(tun, { run, state: 'starting', error: null, msg: null, proc: null, help: null });
     game.publicUrl = null;
     tunnelProgram(run).then(exe => {
       if (exe && tun.run === run) { tun.msg = null; spawnTunnelProcess(exe); }
@@ -1571,7 +1572,7 @@ const tunnel = {
   },
   stop() {
     const { run, proc } = tun;
-    Object.assign(tun, { state: 'off', error: null, msg: null, proc: null, run: null });
+    Object.assign(tun, { state: 'off', error: null, msg: null, proc: null, run: null, help: null });
     game.publicUrl = null;
     if (run) run.abort.abort();   // a download still running is cancelled
     if (proc) try { proc.kill(); } catch {}

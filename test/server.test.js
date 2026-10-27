@@ -729,7 +729,8 @@ tunnelTest('Tunnel: an error line that names api.trycloudflare.com is not a link
     assert.equal(g.tunnel.state().state,'starting');
     assert.equal(g.tunnel.state().url,null);
     spawned[0].emit('exit',1);
-    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'tu DNS no resuelve api.trycloudflare.com (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC',msg:null,provider:'cloudflared'});
+    // help names the README section with the fix: the page links to it.
+    assert.deepEqual(g.tunnel.state(),{state:'error',url:null,error:'es el DNS (tu router o tu proveedor de Internet bloquea api.trycloudflare.com)',msg:null,provider:'cloudflared',help:'internet-bloqueado-por-dns'});
     assert.match(logged.at(-1),/^tunnel: cloudflared se cerró \(código 1\); últimas líneas: .*no such host/);
     // What cloudflared 2026.10.3 really does: its last line, with no level, carries the lookup.
     g.tunnel.start();
@@ -738,7 +739,9 @@ tunnelTest('Tunnel: an error line that names api.trycloudflare.com is not a link
     await waitFor(()=>g.tunnel.state().error);
     assert.equal(g.tunnel.state().url,null);
     spawned[1].emit('exit',1);
-    assert.equal(g.tunnel.state().error,'tu DNS no resuelve api.trycloudflare.com (a veces lo bloquea el router): poné 1.1.1.1 como DNS en esta PC');
+    assert.equal(g.tunnel.state().error,'es el DNS (tu router o tu proveedor de Internet bloquea api.trycloudflare.com)');
+    assert.equal(g.tunnel.state().help,'internet-bloqueado-por-dns');
+    assert.deepEqual(g.tunnel.stop(),OFF);   // stopping clears the help with the error
   }finally{await g.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 tunnelTest('Tunnel: dying before the link with no ERR line shows the last thing it said, and the log keeps it',async()=>{

@@ -68,6 +68,19 @@ Hay **una sola sala, permanente, para hasta 3 amigos** (P2, P3 y P4; vos sos P1)
 - **Misma red:** `http://<IP-de-esta-PC>:3000`. Windows tiene que permitir conexiones entrantes a Node: con la red marcada como *Pública* (y la regla de bloqueo que crea Windows) los otros dispositivos no conectan. Marcá la red como *Privada* y permití el puerto 3000 en ese perfil.
 - **CGNAT:** si alguna de las dos conexiones no permite conexión directa, WebRTC necesita un relay TURN: `TURN_URLS` (separadas por coma), `TURN_USERNAME` y `TURN_CREDENTIAL`. Sin TURN, tu amigo ve un aviso a los 15 segundos.
 
+#### Internet bloqueado por DNS
+
+Si la biblioteca dice **No se pudo abrir el túnel: es el DNS**, el DNS de tu router o de tu proveedor de Internet bloquea `trycloudflare.com`: responde que no existe, aunque 1.1.1.1 y 8.8.8.8 lo encuentran. Reiniciar el modem no alcanza cuando el bloqueo es del proveedor. El arreglo es mandar a 1.1.1.1 solo las consultas de ese dominio (el resto de tu DNS queda igual). En PowerShell **como administrador**:
+
+```powershell
+Add-DnsClientNrptRule -Namespace ".trycloudflare.com" -NameServers "1.1.1.1","8.8.8.8"
+Clear-DnsClientCache
+```
+
+Después apagá y prendé el interruptor 🌐 Internet. Para deshacerlo: `Get-DnsClientNrptRule | Where-Object Namespace -eq '.trycloudflare.com' | Remove-DnsClientNrptRule -Force`.
+
+Si tu amigo tiene el mismo proveedor, a él tampoco le abre el link: en el celular, Ajustes → DNS privado → `one.one.one.one`; en una PC, la misma regla de arriba.
+
 `public/play.html` conserva el modo NES por lockstep (cada navegador emula y solo viajan los botones), ya no enlazado desde la biblioteca.
 
 ## Jugar en la PC (emulador nativo)
